@@ -1,0 +1,20 @@
+[package]
+name = "dispatcharr-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+reqwest = { version = "0.12", features = ["stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+tower-http = { version = "0.6", features = ["cors"] }
+dashmap = "6"
+futures-util = "0.3"
+async-stream = "0.3"
