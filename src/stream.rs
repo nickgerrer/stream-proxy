@@ -23,6 +23,33 @@ fn ts_null_packet() -> Bytes {
     Bytes::from(pkt)
 }
 
+/// Guard that cleans up client state when dropped (i.e. when client disconnects)
+struct ClientGuard {
+    channel_id: String,
+    client_id: String,
+    active: Arc<crate::state::ActiveChannel>,
+    state: Arc<AppState>,
+    bytes_sent: Arc<AtomicU64>,
+}
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        self.active.clients.remove(&self.client_id);
+        tracing::info!(
+            "Channel {}: client {} disconnected (sent {} bytes)",
+            self.channel_id,
+            self.client_id,
+            self.bytes_sent.load(Ordering::Relaxed)
+        );
+
+        // If last client, stop the channel immediately
+        if self.active.clients.is_empty() {
+            tracing::info!("Channel {}: no clients remaining, stopping", self.channel_id);
+            let _ = self.active.stop_tx.send(true);
+        }
+    }
+}
+
 pub async fn stream_channel(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
@@ -66,14 +93,23 @@ pub async fn stream_channel(
         addr
     );
 
+    // Create drop guard for cleanup on client disconnect
+    let guard = ClientGuard {
+        channel_id: channel_id.clone(),
+        client_id: client_id.clone(),
+        active: active.clone(),
+        state: state.clone(),
+        bytes_sent: client_bytes.clone(),
+    };
+
     // Build streaming response body
     let client_bytes_clone = client_bytes.clone();
     let active_clone = active.clone();
-    let channel_id_clone = channel_id.clone();
     let client_id_clone = client_id.clone();
-    let state_clone = state.clone();
 
     let body_stream = async_stream::stream! {
+        // Hold the guard — it will run cleanup when this stream is dropped
+        let _guard = guard;
         let keepalive = ts_null_packet();
         let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_millis(500));
 
@@ -94,7 +130,7 @@ pub async fn stream_channel(
                             // Continue — client will catch up
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            tracing::info!("Channel {} broadcast closed", channel_id_clone);
+                            tracing::info!("Broadcast closed for client {}", client_id_clone);
                             break;
                         }
                     }
@@ -105,29 +141,7 @@ pub async fn stream_channel(
                 }
             }
         }
-
-        // Cleanup
-        active_clone.clients.remove(&client_id_clone);
-        tracing::info!(
-            "Channel {}: client {} disconnected (sent {} bytes)",
-            channel_id_clone,
-            client_id_clone,
-            client_bytes_clone.load(Ordering::Relaxed)
-        );
-
-        // If last client, stop the channel after a delay
-        if active_clone.clients.is_empty() {
-            let _state_for_cleanup = state_clone.clone();
-            let ch_id = channel_id_clone.clone();
-            let active_for_cleanup = active_clone.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                if active_for_cleanup.clients.is_empty() {
-                    tracing::info!("Channel {}: no clients for 30s, stopping", ch_id);
-                    let _ = active_for_cleanup.stop_tx.send(true);
-                }
-            });
-        }
+        // Guard is dropped here too (normal exit), running cleanup
     };
 
     Response::builder()

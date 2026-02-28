@@ -7,7 +7,7 @@ use tokio::time::Instant;
 
 /// Per-account connection tracking
 pub struct AccountState {
-    pub max_connections: u32,
+    pub max_connections: AtomicU32,
     pub active_connections: AtomicU32,
 }
 
@@ -61,7 +61,8 @@ impl AppState {
             for url_entry in &stream.urls {
                 if let Some(account) = self.accounts.get(&url_entry.account_id) {
                     let current = account.active_connections.load(Ordering::Relaxed);
-                    if account.max_connections == 0 || current < account.max_connections {
+                    let max = account.max_connections.load(Ordering::Relaxed);
+                    if max == 0 || current < max {
                         return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
                     }
                 } else {
@@ -93,7 +94,8 @@ impl AppState {
                 }
                 if let Some(account) = self.accounts.get(&url_entry.account_id) {
                     let current = account.active_connections.load(Ordering::Relaxed);
-                    if account.max_connections == 0 || current < account.max_connections {
+                    let max = account.max_connections.load(Ordering::Relaxed);
+                    if max == 0 || current < max {
                         return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
                     }
                 } else {
@@ -112,7 +114,19 @@ impl AppState {
 
     pub fn decrement_connections(&self, account_id: u64) {
         if let Some(account) = self.accounts.get(&account_id) {
-            account.active_connections.fetch_sub(1, Ordering::Relaxed);
+            // Use fetch_update to prevent underflow (sync replaces accounts with fresh 0 counters
+            // while upstream tasks still hold references and decrement on cleanup)
+            let _ = account.active_connections.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |current| {
+                    if current > 0 {
+                        Some(current - 1)
+                    } else {
+                        None // Don't update if already 0
+                    }
+                },
+            );
         }
     }
 }

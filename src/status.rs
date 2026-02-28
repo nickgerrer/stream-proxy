@@ -43,7 +43,7 @@ pub async fn channels_status(State(state): State<Arc<AppState>>) -> Json<Channel
             entry.key().to_string(),
             AccountStatus {
                 active_connections: entry.value().active_connections.load(Ordering::Relaxed),
-                max_connections: entry.value().max_connections,
+                max_connections: entry.value().max_connections.load(Ordering::Relaxed),
             },
         );
     }
