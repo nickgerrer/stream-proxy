@@ -55,6 +55,30 @@ pub async fn channel_detail(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
 ) -> Result<Json<ChannelDetailResponse>, StatusCode> {
+    let cooldowns: Vec<CooldownInfo> = state
+        .stream_cooldowns
+        .get(&channel_id)
+        .map(|entry| {
+            let ttl = crate::state::cooldown_duration();
+            entry
+                .iter()
+                .filter(|c| c.failed_at.elapsed() < ttl)
+                .map(|c| {
+                    let failed_elapsed = c.failed_at.elapsed();
+                    let failed_time = std::time::SystemTime::now() - failed_elapsed;
+                    let expires_time = failed_time + ttl;
+                    CooldownInfo {
+                        stream_id: c.stream_id,
+                        account_id: c.account_id,
+                        failed_at: format_system_time(failed_time),
+                        expires_at: format_system_time(expires_time),
+                        reason: c.reason.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     if let Some(active) = state.active_channels.get(&channel_id) {
         let clients: Vec<ClientInfo> = active
             .clients
@@ -80,6 +104,7 @@ pub async fn channel_detail(
                 }),
             },
             clients,
+            cooldowns,
         }))
     } else if state.channel_routes.contains_key(&channel_id) {
         Ok(Json(ChannelDetailResponse {
@@ -89,10 +114,16 @@ pub async fn channel_detail(
                 upstream: None,
             },
             clients: vec![],
+            cooldowns,
         }))
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+fn format_system_time(t: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = t.into();
+    datetime.to_rfc3339()
 }
 
 fn format_instant(instant: tokio::time::Instant) -> String {

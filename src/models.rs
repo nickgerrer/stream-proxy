@@ -69,11 +69,21 @@ pub struct ChannelsResponse {
     pub accounts: HashMap<String, AccountStatus>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct CooldownInfo {
+    pub stream_id: u64,
+    pub account_id: u64,
+    pub failed_at: String,
+    pub expires_at: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ChannelDetailResponse {
     #[serde(flatten)]
     pub status: ChannelStatus,
     pub clients: Vec<ClientInfo>,
+    pub cooldowns: Vec<CooldownInfo>,
 }
 
 #[derive(Debug, Serialize)]

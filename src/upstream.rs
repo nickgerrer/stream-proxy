@@ -94,6 +94,7 @@ async fn upstream_loop(
         // Upstream failed — try failover
         if let Err(e) = result {
             tracing::warn!("Channel {}: upstream error: {}", channel_id, e);
+            state.record_failure(&channel_id, stream_id, account_id, e.clone());
             failover_count += 1;
 
             if failover_count >= MAX_FAILOVERS {

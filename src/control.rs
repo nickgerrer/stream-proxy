@@ -138,8 +138,27 @@ pub async fn sync(
         }
     }
 
+    state.clear_all_cooldowns();
+
     let channels = state.channel_routes.len();
     let accounts = state.accounts.len();
     tracing::info!("Sync complete: {} channels, {} accounts", channels, accounts);
+    StatusCode::OK
+}
+
+pub async fn clear_channel_cooldowns(
+    State(state): State<Arc<AppState>>,
+    Path(channel_id): Path<String>,
+) -> StatusCode {
+    state.clear_cooldowns(&channel_id);
+    tracing::info!("Channel {}: cooldowns cleared", channel_id);
+    StatusCode::OK
+}
+
+pub async fn clear_all_cooldowns(
+    State(state): State<Arc<AppState>>,
+) -> StatusCode {
+    state.clear_all_cooldowns();
+    tracing::info!("All cooldowns cleared");
     StatusCode::OK
 }

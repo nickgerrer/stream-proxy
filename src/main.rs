@@ -18,6 +18,18 @@ async fn main() {
 
     let state = Arc::new(state::AppState::new());
 
+    // Spawn periodic cooldown cleanup (every 5 minutes)
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                state.cleanup_expired_cooldowns();
+            }
+        });
+    }
+
     let app = Router::new()
         // Control API
         .route(
@@ -33,6 +45,14 @@ async fn main() {
             axum::routing::put(control::put_account),
         )
         .route("/control/v1/sync", axum::routing::post(control::sync))
+        .route(
+            "/control/v1/channels/{channel_id}/cooldowns",
+            axum::routing::delete(control::clear_channel_cooldowns),
+        )
+        .route(
+            "/control/v1/cooldowns",
+            axum::routing::delete(control::clear_all_cooldowns),
+        )
         // Stream endpoint
         .route("/stream/{channel_id}", get(stream::stream_channel))
         // Status API
