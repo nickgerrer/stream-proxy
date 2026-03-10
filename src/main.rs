@@ -1,6 +1,7 @@
 mod config;
 mod control;
 mod models;
+mod ssdp;
 mod state;
 mod status;
 mod stream;
