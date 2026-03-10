@@ -35,6 +35,12 @@ async fn main() {
         });
     }
 
+    // Spawn SSDP discovery task
+    {
+        let rx = state.hdhr_rx.clone();
+        tokio::spawn(ssdp::run(rx));
+    }
+
     let shutdown_state = state.clone();
 
     let app = Router::new()
@@ -116,6 +122,9 @@ async fn shutdown_signal(state: Arc<state::AppState>) {
     for entry in state.active_channels.iter() {
         let _ = entry.value().stop_tx.send(true);
     }
+
+    // Signal SSDP task to send byebye and shut down
+    let _ = state.hdhr_tx.send(None);
 
     // Brief pause to let streams close and clients receive EOF
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
