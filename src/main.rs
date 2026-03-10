@@ -59,6 +59,10 @@ async fn main() {
             "/control/v1/cooldowns",
             axum::routing::delete(control::clear_all_cooldowns),
         )
+        .route(
+            "/control/v1/hdhr",
+            axum::routing::post(control::post_hdhr),
+        )
         // Stream endpoint
         .route("/stream/{channel_id}", get(stream::stream_channel))
         // Status API

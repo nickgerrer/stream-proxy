@@ -162,3 +162,21 @@ pub async fn clear_all_cooldowns(
     tracing::info!("All cooldowns cleared");
     StatusCode::OK
 }
+
+pub async fn post_hdhr(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<HdhrConfigRequest>,
+) -> StatusCode {
+    tracing::info!(
+        device_id = %req.device_id,
+        friendly_name = %req.friendly_name,
+        base_url = %req.base_url,
+        "received HDHR config"
+    );
+    let _ = state.hdhr_tx.send(Some(HdhrConfig {
+        device_id: req.device_id,
+        friendly_name: req.friendly_name,
+        base_url: req.base_url,
+    }));
+    StatusCode::OK
+}
