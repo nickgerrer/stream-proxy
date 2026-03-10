@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
@@ -80,10 +81,13 @@ pub struct AppState {
     pub stream_cooldowns: DashMap<String, Vec<StreamCooldown>>,
     /// Per-channel mutex to prevent duplicate startup
     pub starting_channels: DashMap<String, Arc<Mutex<()>>>,
+    pub hdhr_tx: watch::Sender<Option<HdhrConfig>>,
+    pub hdhr_rx: watch::Receiver<Option<HdhrConfig>>,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Self {
+        let (hdhr_tx, hdhr_rx) = watch::channel(None);
         Self {
             start_time: Instant::now(),
             config,
@@ -92,6 +96,8 @@ impl AppState {
             accounts: DashMap::new(),
             stream_cooldowns: DashMap::new(),
             starting_channels: DashMap::new(),
+            hdhr_tx,
+            hdhr_rx,
         }
     }
 

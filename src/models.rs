@@ -1,6 +1,24 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+// --- HDHR models ---
+
+// Control API input — received from Laravel
+#[derive(Debug, Deserialize)]
+pub struct HdhrConfigRequest {
+    pub device_id: String,
+    pub friendly_name: String,
+    pub base_url: String,
+}
+
+// Internal config used by SSDP task
+#[derive(Debug, Clone)]
+pub struct HdhrConfig {
+    pub device_id: String,
+    pub friendly_name: String,
+    pub base_url: String,
+}
+
 // --- Control API models ---
 
 #[derive(Debug, Deserialize)]

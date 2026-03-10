@@ -16,5 +16,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 dashmap = "6"
+socket2 = { version = "0.6", features = ["all"] }
 futures-util = "0.3"
 async-stream = "0.3"
