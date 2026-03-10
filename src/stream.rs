@@ -7,12 +7,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
+use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tokio::io::AsyncReadExt;
 use tokio::sync::broadcast;
-use serde::Deserialize;
 use tokio::time::Instant;
+
+const MAX_FFMPEG_RESTARTS: u32 = 3;
 
 #[derive(Debug, Deserialize)]
 pub struct StreamParams {
@@ -55,6 +58,206 @@ impl Drop for ClientGuard {
             let _ = self.active.stop_tx.send(true);
         }
     }
+}
+
+fn build_raw_response(
+    mut rx: broadcast::Receiver<Bytes>,
+    active: Arc<crate::state::ActiveChannel>,
+    client_id: String,
+    client_bytes: Arc<AtomicU64>,
+    guard: ClientGuard,
+) -> Response {
+    let body_stream = async_stream::stream! {
+        let _guard = guard;
+        let keepalive = ts_null_packet();
+        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(chunk) => {
+                            let len = chunk.len() as u64;
+                            client_bytes.fetch_add(len, Ordering::Relaxed);
+                            if let Some(client) = active.clients.get(&client_id) {
+                                client.bytes_sent.fetch_add(len, Ordering::Relaxed);
+                            }
+                            yield Ok::<_, std::io::Error>(chunk);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Client {} lagged {} messages", client_id, n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::info!("Broadcast closed for client {}", client_id);
+                            break;
+                        }
+                    }
+                }
+                _ = keepalive_interval.tick() => {
+                    yield Ok::<_, std::io::Error>(keepalive.clone());
+                }
+            }
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp2t")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(body_stream))
+        .unwrap()
+}
+
+fn build_transcoded_response(
+    active: Arc<crate::state::ActiveChannel>,
+    client_id: String,
+    client_bytes: Arc<AtomicU64>,
+    guard: ClientGuard,
+) -> Response {
+    let body_stream = async_stream::stream! {
+        let _guard = guard;
+        let mut restarts = 0u32;
+        let keepalive = ts_null_packet();
+
+        loop {
+            let new_rx = active.sender.subscribe();
+            match crate::transcode::spawn_ffmpeg(new_rx, &client_id) {
+                Ok((mut child, writer)) => {
+                    let mut stdout = child.stdout.take().expect("stdout was piped");
+                    let mut buf = vec![0u8; 65536];
+                    let mut keepalive_interval =
+                        tokio::time::interval(std::time::Duration::from_secs(2));
+
+                    let mut should_restart = false;
+
+                    loop {
+                        tokio::select! {
+                            result = AsyncReadExt::read(&mut stdout, &mut buf) => {
+                                match result {
+                                    Ok(0) => {
+                                        // FFmpeg closed stdout — process exited
+                                        writer.abort();
+                                        restarts += 1;
+                                        if restarts <= MAX_FFMPEG_RESTARTS {
+                                            tracing::warn!(
+                                                "Client {}: FFmpeg exited, restarting ({}/{})",
+                                                client_id, restarts, MAX_FFMPEG_RESTARTS
+                                            );
+                                            should_restart = true;
+                                            tokio::time::sleep(
+                                                std::time::Duration::from_millis(100),
+                                            ).await;
+                                            break; // break inner loop
+                                        }
+                                        tracing::error!(
+                                            "Client {}: FFmpeg restart limit reached, falling back to raw",
+                                            client_id
+                                        );
+                                        // Fall back to raw passthrough (inlined)
+                                        let mut raw_rx = active.sender.subscribe();
+                                        let mut raw_keepalive_interval =
+                                            tokio::time::interval(std::time::Duration::from_millis(500));
+                                        loop {
+                                            tokio::select! {
+                                                result = raw_rx.recv() => {
+                                                    match result {
+                                                        Ok(chunk) => {
+                                                            let len = chunk.len() as u64;
+                                                            client_bytes.fetch_add(len, Ordering::Relaxed);
+                                                            if let Some(client) = active.clients.get(&client_id) {
+                                                                client.bytes_sent.fetch_add(len, Ordering::Relaxed);
+                                                            }
+                                                            yield Ok::<_, std::io::Error>(chunk);
+                                                        }
+                                                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                                                            tracing::warn!("Client {} lagged {} messages", client_id, n);
+                                                        }
+                                                        Err(broadcast::error::RecvError::Closed) => break,
+                                                    }
+                                                }
+                                                _ = raw_keepalive_interval.tick() => {
+                                                    yield Ok::<_, std::io::Error>(keepalive.clone());
+                                                }
+                                            }
+                                        }
+                                        break; // break inner loop (outer will also exit)
+                                    }
+                                    Ok(n) => {
+                                        let data = Bytes::copy_from_slice(&buf[..n]);
+                                        let len = data.len() as u64;
+                                        client_bytes.fetch_add(len, Ordering::Relaxed);
+                                        if let Some(client) = active.clients.get(&client_id) {
+                                            client.bytes_sent.fetch_add(len, Ordering::Relaxed);
+                                        }
+                                        yield Ok::<_, std::io::Error>(data);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            "Client {}: FFmpeg stdout read error: {}",
+                                            client_id, e
+                                        );
+                                        break; // break inner loop (outer will also exit)
+                                    }
+                                }
+                            }
+                            _ = keepalive_interval.tick() => {
+                                yield Ok::<_, std::io::Error>(keepalive.clone());
+                            }
+                        }
+                    }
+
+                    // After inner loop: check if we should restart or exit
+                    if should_restart {
+                        continue; // continue outer loop
+                    }
+                    break; // exit outer loop
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Client {}: FFmpeg spawn failed: {}, falling back to raw",
+                        client_id, e
+                    );
+                    // Fall back to raw passthrough (inlined)
+                    let mut raw_rx = active.sender.subscribe();
+                    let mut raw_keepalive_interval =
+                        tokio::time::interval(std::time::Duration::from_millis(500));
+                    loop {
+                        tokio::select! {
+                            result = raw_rx.recv() => {
+                                match result {
+                                    Ok(chunk) => {
+                                        let len = chunk.len() as u64;
+                                        client_bytes.fetch_add(len, Ordering::Relaxed);
+                                        if let Some(client) = active.clients.get(&client_id) {
+                                            client.bytes_sent.fetch_add(len, Ordering::Relaxed);
+                                        }
+                                        yield Ok::<_, std::io::Error>(chunk);
+                                    }
+                                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                                        tracing::warn!("Client {} lagged {} messages", client_id, n);
+                                    }
+                                    Err(broadcast::error::RecvError::Closed) => break,
+                                }
+                            }
+                            _ = raw_keepalive_interval.tick() => {
+                                yield Ok::<_, std::io::Error>(keepalive.clone());
+                            }
+                        }
+                    }
+                    break; // exit outer loop
+                }
+            }
+        }
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "video/mp2t")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header(header::CONNECTION, "keep-alive")
+        .body(Body::from_stream(body_stream))
+        .unwrap()
 }
 
 pub async fn stream_channel(
@@ -104,7 +307,7 @@ pub async fn stream_channel(
     };
 
     // Subscribe to broadcast channel
-    let mut rx = active.sender.subscribe();
+    let rx = active.sender.subscribe();
 
     // Register client
     let client_id = uuid::Uuid::new_v4().to_string();
@@ -122,10 +325,11 @@ pub async fn stream_channel(
     );
 
     tracing::info!(
-        "Channel {}: client {} connected from {}",
+        "Channel {}: client {} connected from {}{}",
         channel_id,
         client_id,
-        addr
+        addr,
+        if transcode { " (transcoding)" } else { "" }
     );
 
     // Create drop guard for cleanup on client disconnect
@@ -137,53 +341,9 @@ pub async fn stream_channel(
         bytes_sent: client_bytes.clone(),
     };
 
-    // Build streaming response body
-    let client_bytes_clone = client_bytes.clone();
-    let active_clone = active.clone();
-    let client_id_clone = client_id.clone();
-
-    let body_stream = async_stream::stream! {
-        // Hold the guard — it will run cleanup when this stream is dropped
-        let _guard = guard;
-        let keepalive = ts_null_packet();
-        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-
-        loop {
-            tokio::select! {
-                result = rx.recv() => {
-                    match result {
-                        Ok(chunk) => {
-                            let len = chunk.len() as u64;
-                            client_bytes_clone.fetch_add(len, Ordering::Relaxed);
-                            if let Some(client) = active_clone.clients.get(&client_id_clone) {
-                                client.bytes_sent.fetch_add(len, Ordering::Relaxed);
-                            }
-                            yield Ok::<_, std::io::Error>(chunk);
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!("Client {} lagged {} messages", client_id_clone, n);
-                            // Continue — client will catch up
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            tracing::info!("Broadcast closed for client {}", client_id_clone);
-                            break;
-                        }
-                    }
-                }
-                _ = keepalive_interval.tick() => {
-                    // Only send keepalive if no data recently
-                    yield Ok::<_, std::io::Error>(keepalive.clone());
-                }
-            }
-        }
-        // Guard is dropped here too (normal exit), running cleanup
-    };
-
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "video/mp2t")
-        .header(header::CACHE_CONTROL, "no-cache")
-        .header(header::CONNECTION, "keep-alive")
-        .body(Body::from_stream(body_stream))
-        .unwrap()
+    if transcode {
+        build_transcoded_response(active, client_id, client_bytes, guard)
+    } else {
+        build_raw_response(rx, active, client_id, client_bytes, guard)
+    }
 }
