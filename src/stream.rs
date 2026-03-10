@@ -2,7 +2,7 @@ use crate::state::{AppState, ClientState};
 use crate::upstream;
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Path, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -11,7 +11,14 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use serde::Deserialize;
 use tokio::time::Instant;
+
+#[derive(Debug, Deserialize)]
+pub struct StreamParams {
+    #[serde(default)]
+    pub transcode: Option<bool>,
+}
 
 /// TS null packet (188 bytes) used as keepalive
 fn ts_null_packet() -> Bytes {
@@ -53,6 +60,7 @@ impl Drop for ClientGuard {
 pub async fn stream_channel(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
+    Query(_params): Query<StreamParams>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     // Get or start the channel (with startup lock to prevent races)
