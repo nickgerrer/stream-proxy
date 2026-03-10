@@ -50,6 +50,7 @@ pub struct ClientState {
     pub connected_since: Instant,
     pub bytes_sent: AtomicU64,
     pub remote_addr: String,
+    pub transcoding: bool,
 }
 
 /// Routing config for a channel (from Django push)

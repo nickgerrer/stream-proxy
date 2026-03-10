@@ -97,6 +97,7 @@ pub async fn channel_detail(
                 connected_since: format_instant(c.connected_since),
                 bytes_sent: c.bytes_sent.load(Ordering::Relaxed),
                 remote_addr: c.remote_addr.clone(),
+                transcoding: c.transcoding,
             })
             .collect();
 

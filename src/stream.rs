@@ -60,7 +60,7 @@ impl Drop for ClientGuard {
 pub async fn stream_channel(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
-    Query(_params): Query<StreamParams>,
+    Query(params): Query<StreamParams>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     // Get or start the channel (with startup lock to prevent races)
@@ -109,6 +109,7 @@ pub async fn stream_channel(
     // Register client
     let client_id = uuid::Uuid::new_v4().to_string();
     let client_bytes = Arc::new(AtomicU64::new(0));
+    let transcode = params.transcode.unwrap_or(false);
     active.clients.insert(
         client_id.clone(),
         ClientState {
@@ -116,6 +117,7 @@ pub async fn stream_channel(
             connected_since: Instant::now(),
             bytes_sent: AtomicU64::new(0),
             remote_addr: addr.to_string(),
+            transcoding: transcode,
         },
     );
 

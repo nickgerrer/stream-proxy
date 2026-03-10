@@ -55,6 +55,7 @@ pub struct ClientInfo {
     pub connected_since: String,
     pub bytes_sent: u64,
     pub remote_addr: String,
+    pub transcoding: bool,
 }
 
 #[derive(Debug, Serialize)]
