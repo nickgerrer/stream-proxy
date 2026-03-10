@@ -306,9 +306,6 @@ pub async fn stream_channel(
         }
     };
 
-    // Subscribe to broadcast channel
-    let rx = active.sender.subscribe();
-
     // Register client
     let client_id = uuid::Uuid::new_v4().to_string();
     let client_bytes = Arc::new(AtomicU64::new(0));
@@ -344,6 +341,7 @@ pub async fn stream_channel(
     if transcode {
         build_transcoded_response(active, client_id, client_bytes, guard)
     } else {
+        let rx = active.sender.subscribe();
         build_raw_response(rx, active, client_id, client_bytes, guard)
     }
 }
