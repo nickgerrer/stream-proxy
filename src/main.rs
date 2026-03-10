@@ -1,3 +1,4 @@
+mod config;
 mod control;
 mod models;
 mod state;
@@ -16,7 +17,9 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let state = Arc::new(state::AppState::new());
+    let config = config::Config::from_env();
+    let port = config.port;
+    let state = Arc::new(state::AppState::new(config));
 
     // Spawn periodic cooldown cleanup (every 5 minutes)
     {
@@ -29,6 +32,8 @@ async fn main() {
             }
         });
     }
+
+    let shutdown_state = state.clone();
 
     let app = Router::new()
         // Control API
@@ -64,15 +69,51 @@ async fn main() {
         .route("/status/v1/health", get(health))
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8888));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Rust proxy listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal(shutdown_state))
     .await
     .unwrap();
+}
+
+async fn shutdown_signal(state: Arc<state::AppState>) {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+
+    tracing::info!("Shutdown signal received, stopping all channels...");
+
+    // Stop all active upstream connections
+    for entry in state.active_channels.iter() {
+        let _ = entry.value().stop_tx.send(true);
+    }
+
+    // Brief pause to let streams close and clients receive EOF
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tracing::info!("Shutdown complete");
 }
 
 async fn health(

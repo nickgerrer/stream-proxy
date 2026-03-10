@@ -1,14 +1,32 @@
+use crate::config::Config;
 use crate::models::*;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use tokio::time::Instant;
 
-/// How long a failed stream is skipped before retrying (default 30 min)
-pub fn cooldown_duration() -> Duration {
-    Duration::from_secs(1800)
+/// Classification of upstream failure for tiered cooldowns
+#[derive(Debug, Clone, PartialEq)]
+pub enum FailureKind {
+    /// Transient failures (timeouts, stream ended) — short cooldown
+    Transient,
+    /// Hard failures (HTTP 403/401/451/410) — long cooldown
+    Hard,
+}
+
+/// Classify a failure error string into a FailureKind
+pub fn classify_failure(error: &str) -> FailureKind {
+    if error.contains("HTTP 403")
+        || error.contains("HTTP 401")
+        || error.contains("HTTP 451")
+        || error.contains("HTTP 410")
+    {
+        FailureKind::Hard
+    } else {
+        FailureKind::Transient
+    }
 }
 
 /// A stream+account pair that failed and is cooling down
@@ -17,6 +35,7 @@ pub struct StreamCooldown {
     pub account_id: u64,
     pub failed_at: Instant,
     pub reason: String,
+    pub kind: FailureKind,
 }
 
 /// Per-account connection tracking
@@ -53,25 +72,30 @@ pub struct ActiveChannel {
 /// Top-level application state shared across all handlers
 pub struct AppState {
     pub start_time: Instant,
+    pub config: Config,
     pub channel_routes: DashMap<String, ChannelRouting>,
     pub active_channels: DashMap<String, Arc<ActiveChannel>>,
     pub accounts: DashMap<u64, AccountState>,
     pub stream_cooldowns: DashMap<String, Vec<StreamCooldown>>,
+    /// Per-channel mutex to prevent duplicate startup
+    pub starting_channels: DashMap<String, Arc<Mutex<()>>>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
             start_time: Instant::now(),
+            config,
             channel_routes: DashMap::new(),
             active_channels: DashMap::new(),
             accounts: DashMap::new(),
             stream_cooldowns: DashMap::new(),
+            starting_channels: DashMap::new(),
         }
     }
 
     /// Record that a stream failed for a channel.
-    pub fn record_failure(&self, channel_id: &str, stream_id: u64, account_id: u64, reason: String) {
+    pub fn record_failure(&self, channel_id: &str, stream_id: u64, account_id: u64, reason: String, kind: FailureKind) {
         let mut entry = self.stream_cooldowns.entry(channel_id.to_string()).or_default();
         entry.retain(|c| !(c.stream_id == stream_id && c.account_id == account_id));
         entry.push(StreamCooldown {
@@ -79,14 +103,18 @@ impl AppState {
             account_id,
             failed_at: Instant::now(),
             reason,
+            kind,
         });
     }
 
     /// Check if a stream+account is currently cooled down for a channel.
     fn is_cooled_down(&self, channel_id: &str, stream_id: u64, account_id: u64) -> bool {
         if let Some(cooldowns) = self.stream_cooldowns.get(channel_id) {
-            let ttl = cooldown_duration();
             cooldowns.iter().any(|c| {
+                let ttl = match c.kind {
+                    FailureKind::Transient => self.config.transient_cooldown,
+                    FailureKind::Hard => self.config.hard_cooldown,
+                };
                 c.stream_id == stream_id
                     && c.account_id == account_id
                     && c.failed_at.elapsed() < ttl
@@ -98,10 +126,15 @@ impl AppState {
 
     /// Remove expired cooldowns for all channels.
     pub fn cleanup_expired_cooldowns(&self) {
-        let ttl = cooldown_duration();
         let mut empty_channels = Vec::new();
         for mut entry in self.stream_cooldowns.iter_mut() {
-            entry.value_mut().retain(|c| c.failed_at.elapsed() < ttl);
+            entry.value_mut().retain(|c| {
+                let ttl = match c.kind {
+                    FailureKind::Transient => self.config.transient_cooldown,
+                    FailureKind::Hard => self.config.hard_cooldown,
+                };
+                c.failed_at.elapsed() < ttl
+            });
             if entry.value().is_empty() {
                 empty_channels.push(entry.key().clone());
             }
@@ -171,6 +204,7 @@ impl AppState {
     }
 
     /// Try the next available stream after the current one fails.
+    /// Priority: (1) other streams on SAME account (free), (2) streams on different accounts (costs a slot).
     pub fn select_next_stream(
         &self,
         channel_id: &str,
@@ -178,27 +212,77 @@ impl AppState {
         failed_account_id: u64,
     ) -> Option<(u64, u64, String)> {
         let routing = self.channel_routes.get(channel_id)?;
-        let mut past_failed = false;
-        for stream in &routing.streams {
+
+        // Phase 1: Try other streams on the SAME account (free — no extra connection slot)
+        for stream in routing.streams.iter() {
+            if stream.id == failed_stream_id {
+                continue; // Skip the stream that just failed
+            }
             for url_entry in &stream.urls {
-                if stream.id == failed_stream_id && url_entry.account_id == failed_account_id {
-                    past_failed = true;
+                if url_entry.account_id != failed_account_id {
+                    continue; // Only same account in this phase
+                }
+                if self.is_cooled_down(channel_id, stream.id, url_entry.account_id) {
                     continue;
                 }
-                if !past_failed {
+                // Same account — no need to check connection limits (already counted)
+                return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
+            }
+        }
+
+        // Phase 2: Try streams on DIFFERENT accounts (costs a connection slot)
+        for stream in routing.streams.iter() {
+            for url_entry in &stream.urls {
+                if url_entry.account_id == failed_account_id {
+                    continue; // Skip same account — exhausted in phase 1
+                }
+                if self.is_cooled_down(channel_id, stream.id, url_entry.account_id) {
                     continue;
                 }
                 if let Some(account) = self.accounts.get(&url_entry.account_id) {
                     let current = account.active_connections.load(Ordering::Relaxed);
                     let max = account.max_connections.load(Ordering::Relaxed);
-                    if max == 0 || current < max {
-                        return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
+                    if max > 0 && current >= max {
+                        continue; // Account at capacity
                     }
-                } else {
-                    return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
                 }
+                return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
             }
         }
+
+        // Phase 3: All options cooled down — ignore cooldowns (better than killing the channel)
+        tracing::warn!(
+            "Channel {}: all failover options cooled down, ignoring cooldowns",
+            channel_id
+        );
+        // Prefer same account first, then cross-account
+        for stream in routing.streams.iter() {
+            if stream.id == failed_stream_id {
+                continue;
+            }
+            for url_entry in &stream.urls {
+                if url_entry.account_id != failed_account_id {
+                    continue;
+                }
+                return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
+            }
+        }
+        for stream in routing.streams.iter() {
+            for url_entry in &stream.urls {
+                if url_entry.account_id == failed_account_id {
+                    continue;
+                }
+                if let Some(account) = self.accounts.get(&url_entry.account_id) {
+                    let current = account.active_connections.load(Ordering::Relaxed);
+                    let max = account.max_connections.load(Ordering::Relaxed);
+                    if max > 0 && current >= max {
+                        continue;
+                    }
+                }
+                return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
+            }
+        }
+
         None
     }
 

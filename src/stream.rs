@@ -55,19 +55,44 @@ pub async fn stream_channel(
     Path(channel_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    // Get or start the channel
+    // Get or start the channel (with startup lock to prevent races)
     let active = if let Some(existing) = state.active_channels.get(&channel_id) {
         existing.value().clone()
     } else {
-        // Select a stream + account
-        let (stream_id, account_id, url) = match state.select_stream(&channel_id) {
-            Some(s) => s,
-            None => {
-                return (StatusCode::SERVICE_UNAVAILABLE, "No streams available").into_response();
-            }
-        };
+        // Get or create a per-channel startup mutex
+        let startup_lock = state
+            .starting_channels
+            .entry(channel_id.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
 
-        upstream::start_channel(state.clone(), channel_id.clone(), stream_id, account_id, url)
+        let _guard = startup_lock.lock().await;
+
+        // Re-check after acquiring lock — another request may have started it
+        if let Some(existing) = state.active_channels.get(&channel_id) {
+            existing.value().clone()
+        } else {
+            let (stream_id, account_id, url) = match state.select_stream(&channel_id) {
+                Some(s) => s,
+                None => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "No streams available")
+                        .into_response();
+                }
+            };
+
+            let active = upstream::start_channel(
+                state.clone(),
+                channel_id.clone(),
+                stream_id,
+                account_id,
+                url,
+            );
+
+            // Clean up the startup lock entry
+            state.starting_channels.remove(&channel_id);
+
+            active
+        }
     };
 
     // Subscribe to broadcast channel

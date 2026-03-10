@@ -8,7 +8,6 @@ use tokio::time::Instant;
 
 const BROADCAST_CAPACITY: usize = 64;
 const CHUNK_SIZE: usize = 188 * 1024; // ~188 KB (aligned to TS packet size)
-const MAX_FAILOVERS: u32 = 10;
 
 /// Start streaming a channel. Spawns a background task that:
 /// - Opens upstream HTTP connection
@@ -73,6 +72,7 @@ async fn upstream_loop(
 ) {
     let client = Client::new();
     let mut failover_count: u32 = 0;
+    let mut same_url_retries: u32 = 0;
 
     loop {
         tracing::info!(
@@ -91,18 +91,46 @@ async fn upstream_loop(
             break;
         }
 
-        // Upstream failed — try failover
         if let Err(e) = result {
             tracing::warn!("Channel {}: upstream error: {}", channel_id, e);
-            state.record_failure(&channel_id, stream_id, account_id, e.clone());
+            let kind = crate::state::classify_failure(&e);
+
+            // For transient errors (not "stream ended"), retry same URL before failover.
+            // "stream ended" means the server closed cleanly — retrying won't help.
+            let is_retryable = kind == crate::state::FailureKind::Transient
+                && !e.contains("stream ended");
+
+            if is_retryable && same_url_retries < state.config.max_same_url_retries {
+                same_url_retries += 1;
+                tracing::info!(
+                    "Channel {}: transient error, retrying same URL ({}/{})",
+                    channel_id,
+                    same_url_retries,
+                    state.config.max_same_url_retries
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(state.config.retry_delay) => {
+                        if *stop_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = stop_rx.changed() => {
+                        tracing::info!("Channel {}: stop signal during retry delay", channel_id);
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // Retries exhausted, non-retryable, or hard error — record failure and failover
+            state.record_failure(&channel_id, stream_id, account_id, e.clone(), kind);
+            same_url_retries = 0;
             failover_count += 1;
 
-            if failover_count >= MAX_FAILOVERS {
+            if failover_count >= state.config.max_failovers {
                 tracing::error!("Channel {}: max failovers reached", channel_id);
                 break;
             }
-
-            state.decrement_connections(account_id);
 
             if let Some((next_sid, next_aid, next_url)) =
                 state.select_next_stream(&channel_id, stream_id, account_id)
@@ -113,10 +141,14 @@ async fn upstream_loop(
                     next_sid,
                     next_aid
                 );
+                if next_aid != account_id {
+                    // Cross-account failover: release old slot, acquire new one
+                    state.decrement_connections(account_id);
+                    state.increment_connections(next_aid);
+                }
                 stream_id = next_sid;
                 account_id = next_aid;
                 url = next_url;
-                state.increment_connections(account_id);
             } else {
                 tracing::error!("Channel {}: no more streams available", channel_id);
                 break;

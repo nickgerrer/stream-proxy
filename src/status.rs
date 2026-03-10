@@ -59,11 +59,20 @@ pub async fn channel_detail(
         .stream_cooldowns
         .get(&channel_id)
         .map(|entry| {
-            let ttl = crate::state::cooldown_duration();
             entry
                 .iter()
-                .filter(|c| c.failed_at.elapsed() < ttl)
+                .filter(|c| {
+                    let ttl = match c.kind {
+                        crate::state::FailureKind::Transient => state.config.transient_cooldown,
+                        crate::state::FailureKind::Hard => state.config.hard_cooldown,
+                    };
+                    c.failed_at.elapsed() < ttl
+                })
                 .map(|c| {
+                    let ttl = match c.kind {
+                        crate::state::FailureKind::Transient => state.config.transient_cooldown,
+                        crate::state::FailureKind::Hard => state.config.hard_cooldown,
+                    };
                     let failed_elapsed = c.failed_at.elapsed();
                     let failed_time = std::time::SystemTime::now() - failed_elapsed;
                     let expires_time = failed_time + ttl;

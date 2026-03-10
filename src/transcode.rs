@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 /// `kill_on_drop(true)` ensures FFmpeg is killed when the Child is dropped.
 pub fn spawn_ffmpeg(
     rx: broadcast::Receiver<Bytes>,
+    client_id: &str,
 ) -> Result<(Child, JoinHandle<()>), std::io::Error> {
     let mut child = Command::new("ffmpeg")
         .args([
@@ -48,11 +49,12 @@ pub fn spawn_ffmpeg(
     let stderr = child.stderr.take().expect("stderr was configured as piped");
 
     // Log FFmpeg stderr at debug level
+    let client_id_owned = client_id.to_string();
     tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!("ffmpeg: {}", line);
+            tracing::debug!("ffmpeg[{}]: {}", client_id_owned, line);
         }
     });
 
@@ -62,7 +64,8 @@ pub fn spawn_ffmpeg(
         loop {
             match rx.recv().await {
                 Ok(chunk) => {
-                    if stdin.write_all(&chunk).await.is_err() {
+                    if let Err(e) = stdin.write_all(&chunk).await {
+                        tracing::debug!("FFmpeg stdin write error: {}", e);
                         break;
                     }
                 }
@@ -72,6 +75,7 @@ pub fn spawn_ffmpeg(
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
+        let _ = stdin.shutdown().await;
     });
 
     Ok((child, writer_handle))
