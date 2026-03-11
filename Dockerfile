@@ -6,7 +6,7 @@ RUN cargo build --release
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /build/target/release/dispatcharr-proxy /usr/local/bin/dispatcharr-proxy
+COPY --from=builder /build/target/release/transmitarr-stream-proxy /usr/local/bin/transmitarr-stream-proxy
 EXPOSE 8888
 ENV RUST_LOG=info
-CMD ["dispatcharr-proxy"]
+CMD ["transmitarr-stream-proxy"]

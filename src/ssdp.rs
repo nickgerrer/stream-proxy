@@ -18,7 +18,7 @@ fn search_response(config: &HdhrConfig) -> String {
          LOCATION: {}/hdhr/device.xml\r\n\
          ST: {}\r\n\
          USN: uuid:{}::{}\r\n\
-         SERVER: Dispatcharr/1.0 UPnP/1.0\r\n\
+         SERVER: Transmitarr/1.0 UPnP/1.0\r\n\
          \r\n",
         config.base_url, DEVICE_TYPE, config.device_id, DEVICE_TYPE
     )
@@ -33,7 +33,7 @@ fn notify_alive(config: &HdhrConfig) -> String {
          NT: {}\r\n\
          NTS: ssdp:alive\r\n\
          USN: uuid:{}::{}\r\n\
-         SERVER: Dispatcharr/1.0 UPnP/1.0\r\n\
+         SERVER: Transmitarr/1.0 UPnP/1.0\r\n\
          \r\n",
         config.base_url, DEVICE_TYPE, config.device_id, DEVICE_TYPE
     )
