@@ -161,13 +161,16 @@ impl AppState {
         self.stream_cooldowns.clear();
     }
 
-    /// Find first available stream+account for a channel, respecting limits and cooldowns.
+    /// Find available stream+account for a channel using least-connections selection.
     pub fn select_stream(&self, channel_id: &str) -> Option<(u64, u64, String)> {
         let routing = self.channel_routes.get(channel_id)?;
         let mut all_cooled_down = true;
 
-        // First pass: skip cooled-down streams
+        // Iterate streams in config order (quality tiers).
+        // Within each stream, pick the account with least active connections.
         for stream in &routing.streams {
+            let mut best: Option<(u64, String, u32)> = None; // (account_id, url, active_connections)
+
             for url_entry in &stream.urls {
                 if self.is_cooled_down(channel_id, stream.id, url_entry.account_id) {
                     continue;
@@ -177,12 +180,20 @@ impl AppState {
                 if let Some(account) = self.accounts.get(&url_entry.account_id) {
                     let current = account.active_connections.load(Ordering::Relaxed);
                     let max = account.max_connections.load(Ordering::Relaxed);
-                    if max == 0 || current < max {
-                        return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
+                    if max > 0 && current >= max {
+                        continue; // At capacity
+                    }
+                    if best.is_none() || current < best.as_ref().unwrap().2 {
+                        best = Some((url_entry.account_id, url_entry.url.clone(), current));
                     }
                 } else {
+                    // Unknown account — use immediately (no limit tracking)
                     return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
                 }
+            }
+
+            if let Some((account_id, url, _)) = best {
+                return Some((stream.id, account_id, url));
             }
         }
 
@@ -193,16 +204,25 @@ impl AppState {
                 channel_id
             );
             for stream in &routing.streams {
+                let mut best: Option<(u64, String, u32)> = None;
+
                 for url_entry in &stream.urls {
                     if let Some(account) = self.accounts.get(&url_entry.account_id) {
                         let current = account.active_connections.load(Ordering::Relaxed);
                         let max = account.max_connections.load(Ordering::Relaxed);
-                        if max == 0 || current < max {
-                            return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
+                        if max > 0 && current >= max {
+                            continue;
+                        }
+                        if best.is_none() || current < best.as_ref().unwrap().2 {
+                            best = Some((url_entry.account_id, url_entry.url.clone(), current));
                         }
                     } else {
                         return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
                     }
+                }
+
+                if let Some((account_id, url, _)) = best {
+                    return Some((stream.id, account_id, url));
                 }
             }
         }
@@ -237,11 +257,13 @@ impl AppState {
             }
         }
 
-        // Phase 2: Try streams on DIFFERENT accounts (costs a connection slot)
+        // Phase 2: Try streams on DIFFERENT accounts — pick least connections
+        let mut best_cross: Option<(u64, u64, String, u32)> = None; // (stream_id, account_id, url, active)
+
         for stream in routing.streams.iter() {
             for url_entry in &stream.urls {
                 if url_entry.account_id == failed_account_id {
-                    continue; // Skip same account — exhausted in phase 1
+                    continue;
                 }
                 if self.is_cooled_down(channel_id, stream.id, url_entry.account_id) {
                     continue;
@@ -250,11 +272,19 @@ impl AppState {
                     let current = account.active_connections.load(Ordering::Relaxed);
                     let max = account.max_connections.load(Ordering::Relaxed);
                     if max > 0 && current >= max {
-                        continue; // Account at capacity
+                        continue;
                     }
+                    if best_cross.is_none() || current < best_cross.as_ref().unwrap().3 {
+                        best_cross = Some((stream.id, url_entry.account_id, url_entry.url.clone(), current));
+                    }
+                } else {
+                    return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
                 }
-                return Some((stream.id, url_entry.account_id, url_entry.url.clone()));
             }
+        }
+
+        if let Some((sid, aid, url, _)) = best_cross {
+            return Some((sid, aid, url));
         }
 
         // Phase 3: All options cooled down — ignore cooldowns (better than killing the channel)
