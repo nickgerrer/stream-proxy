@@ -323,10 +323,6 @@ pub fn extract_pts(payload: &[u8]) -> Option<u64> {
     }
 
     // PTS starts at byte 9 (5 bytes)
-    if payload.len() < 14 {
-        return None;
-    }
-
     let b = &payload[9..14];
     let pts = ((u64::from(b[0]) & 0x0E) << 29)
         | (u64::from(b[1]) << 22)
@@ -415,6 +411,9 @@ pub struct PtsTracker {
 /// 1 second in 90 kHz PTS ticks.
 const PTS_ONE_SECOND: u64 = 90_000;
 
+/// Full PCR range in 27 MHz ticks (33-bit base * 300 + max 9-bit extension).
+const PCR_WRAP: u64 = (1u64 << 33) * 300 + 299;
+
 impl PtsTracker {
     pub fn new() -> Self {
         Self {
@@ -488,7 +487,12 @@ impl PcrTracker {
         {
             let wall_elapsed = now.duration_since(prev_instant);
             let wall_ticks = (wall_elapsed.as_nanos() as u64 * 27) / 1_000; // ns → 27 MHz ticks
-            let pcr_elapsed = pcr_27mhz.wrapping_sub(prev_pcr);
+            let pcr_elapsed = if pcr_27mhz >= prev_pcr {
+                pcr_27mhz - prev_pcr
+            } else {
+                // PCR wrap-around: 42-bit range in 27 MHz ticks
+                (PCR_WRAP - prev_pcr) + pcr_27mhz
+            };
 
             let jitter = pcr_elapsed.abs_diff(wall_ticks);
 
@@ -1310,6 +1314,36 @@ mod tests {
         let jitter = tracker.record(&pcr2);
         assert!(jitter.is_some());
         assert_eq!(tracker.jitter_count, 1);
+    }
+
+    #[test]
+    fn test_pcr_tracker_wrap_around() {
+        let mut tracker = PcrTracker::new();
+
+        // Place PCR near the 42-bit wrap point.
+        // PCR base is 33 bits; max base = (1 << 33) - 1.
+        let near_max_base: u64 = (1u64 << 33) - 1;
+        let pcr1 = Pcr { base: near_max_base, extension: 0 };
+        tracker.record(&pcr1);
+
+        // Wrap around to a small PCR value. The forward distance in 27 MHz
+        // ticks is small, so jitter should remain reasonable (not near u64::MAX).
+        let pcr2 = Pcr { base: 1000, extension: 0 };
+        let jitter = tracker.record(&pcr2);
+
+        assert!(jitter.is_some());
+        // The PCR elapsed should be the small forward distance across the wrap,
+        // not a huge value near u64::MAX.
+        let pcr1_27mhz = near_max_base * 300;
+        let pcr2_27mhz = 1000u64 * 300;
+        let expected_elapsed = (PCR_WRAP - pcr1_27mhz) + pcr2_27mhz;
+        // Jitter = |pcr_elapsed - wall_ticks|. Wall time is near-zero so
+        // jitter ≈ expected_elapsed, which is well below u64::MAX.
+        assert!(
+            tracker.jitter_max < expected_elapsed * 2,
+            "jitter_max {} should be bounded, not near u64::MAX",
+            tracker.jitter_max
+        );
     }
 
     // -----------------------------------------------------------------------
