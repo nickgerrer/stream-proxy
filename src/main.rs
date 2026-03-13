@@ -6,6 +6,7 @@ mod state;
 mod status;
 mod stream;
 mod transcode;
+mod ts;
 mod upstream;
 
 use axum::{routing::get, Router};
