@@ -158,6 +158,8 @@ pub struct PmtStream {
 pub struct PmtInfo {
     pub pcr_pid: u16,
     pub streams: Vec<PmtStream>,
+    /// PMT version number (5 bits, 0–31), extracted from the section header.
+    pub version: u8,
 }
 
 /// Parse a PMT section from the payload bytes (after the pointer field).
@@ -179,6 +181,9 @@ pub fn parse_pmt(section: &[u8]) -> Option<PmtInfo> {
     if section_length < header_after_length + crc_size {
         return None;
     }
+
+    // Byte 5: reserved(2) | version_number(5) | current_next_indicator(1)
+    let version = (section[5] >> 1) & 0x1F;
 
     let pcr_pid = u16::from_be_bytes([section[8] & 0x1F, section[9]]);
     let program_info_length =
@@ -219,7 +224,7 @@ pub fn parse_pmt(section: &[u8]) -> Option<PmtInfo> {
         pos = desc_end;
     }
 
-    Some(PmtInfo { pcr_pid, streams })
+    Some(PmtInfo { pcr_pid, streams, version })
 }
 
 // ---------------------------------------------------------------------------
@@ -1506,6 +1511,10 @@ fn audio_codec_from_stream_type(st: u8) -> Option<AudioCodec> {
 // StreamInfoDetector — detects codec details from PES payloads
 // ---------------------------------------------------------------------------
 
+/// Maximum PES accumulator buffer size (128 KB).
+/// Prevents unbounded memory growth on corrupt or unexpected streams.
+const PES_ACCUMULATOR_CAP: usize = 128 * 1024;
+
 /// Accumulates PES payload data for a PID, handling multi-packet assembly.
 struct PesAccumulator {
     data: Vec<u8>,
@@ -1528,8 +1537,14 @@ impl PesAccumulator {
     }
 
     /// Continue accumulating payload data.
+    /// Stops accumulating if the buffer exceeds `PES_ACCUMULATOR_CAP`.
     fn append(&mut self, payload: &[u8]) {
         if self.active {
+            if self.data.len() + payload.len() > PES_ACCUMULATOR_CAP {
+                self.data.clear();
+                self.active = false;
+                return;
+            }
             self.data.extend_from_slice(payload);
         }
     }
@@ -2136,6 +2151,7 @@ mod tests {
         let info = parse_pmt(&section).unwrap();
 
         assert_eq!(info.pcr_pid, 0x0100);
+        assert_eq!(info.version, 0);
         assert_eq!(info.streams.len(), 2);
         assert_eq!(info.streams[0].stream_type, STREAM_TYPE_H264);
         assert_eq!(info.streams[0].elementary_pid, 0x0100);
@@ -3421,6 +3437,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_H264, elementary_pid: 0x0100, descriptors: vec![] },
                 PmtStream { stream_type: STREAM_TYPE_AAC, elementary_pid: 0x0101, descriptors: vec![] },
@@ -3440,6 +3457,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_H264, elementary_pid: 0x0100, descriptors: vec![] },
             ],
@@ -3458,6 +3476,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_H264, elementary_pid: 0x0100, descriptors: vec![] },
             ],
@@ -3475,6 +3494,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_H264, elementary_pid: 0x0100, descriptors: vec![] },
                 PmtStream { stream_type: STREAM_TYPE_AAC, elementary_pid: 0x0101, descriptors: vec![] },
@@ -3508,6 +3528,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_H264, elementary_pid: 0x0100, descriptors: vec![] },
                 PmtStream { stream_type: STREAM_TYPE_AAC, elementary_pid: 0x0101, descriptors: vec![] },
@@ -3557,6 +3578,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_H264, elementary_pid: 0x0100, descriptors: vec![] },
             ],
@@ -3583,6 +3605,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_MPEG2_VIDEO, elementary_pid: 0x0100, descriptors: vec![] },
             ],
@@ -3606,6 +3629,7 @@ mod tests {
         let mut detector = StreamInfoDetector::new();
         let pmt = PmtInfo {
             pcr_pid: 0x0100,
+            version: 0,
             streams: vec![
                 PmtStream { stream_type: STREAM_TYPE_MPEG2_VIDEO, elementary_pid: 0x0100, descriptors: vec![] },
             ],
@@ -3619,5 +3643,58 @@ mod tests {
         detector.reset();
         assert!(detector.stream_info.is_none());
         assert!(!detector.video_detected);
+    }
+
+    #[test]
+    fn test_pes_accumulator_cap() {
+        let mut acc = PesAccumulator::new();
+        // Start with a small payload
+        acc.start(&[0x01; 64]);
+        assert!(acc.active);
+        assert_eq!(acc.data().len(), 64);
+
+        // Append data just under the cap — should succeed
+        let chunk = vec![0x02; 1024];
+        for _ in 0..126 {
+            acc.append(&chunk);
+        }
+        assert!(acc.active);
+        assert_eq!(acc.data().len(), 64 + 126 * 1024);
+
+        // Append that pushes over PES_ACCUMULATOR_CAP — buffer should be cleared and deactivated
+        let overflow = vec![0x03; 2048];
+        acc.append(&overflow);
+        assert!(!acc.active);
+        assert!(acc.data().is_empty());
+
+        // Subsequent appends are no-ops while inactive
+        acc.append(&[0x04; 64]);
+        assert!(acc.data().is_empty());
+
+        // A new PUSI start reactivates the accumulator
+        acc.start(&[0x05; 32]);
+        assert!(acc.active);
+        assert_eq!(acc.data().len(), 32);
+    }
+
+    #[test]
+    fn test_pmt_version_extraction() {
+        let mut section = make_pmt_section(0x0100, &[
+            (STREAM_TYPE_H264, 0x0100),
+        ]);
+
+        // Default make_pmt_section sets version=0 (byte 5 = 0xC1 = 11_00000_1)
+        let info = parse_pmt(&section).unwrap();
+        assert_eq!(info.version, 0);
+
+        // Set version to 15: byte 5 = 11_01111_1 = 0xDF
+        section[5] = 0xDF;
+        let info = parse_pmt(&section).unwrap();
+        assert_eq!(info.version, 15);
+
+        // Set version to 31 (max): byte 5 = 11_11111_1 = 0xFF
+        section[5] = 0xFF;
+        let info = parse_pmt(&section).unwrap();
+        assert_eq!(info.version, 31);
     }
 }
