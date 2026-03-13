@@ -1129,10 +1129,7 @@ fn parse_h264_vui_timing(bs: &mut BitstreamReader) -> Option<(u32, u32)> {
     let timing_present = bs.read_bits(1)?;
     if timing_present != 0 {
         let num_units_in_tick = bs.read_bits(32)?;
-        // time_scale is 32 bits, but read_bits returns u32 — read as two 16-bit halves
-        let time_scale_hi = bs.read_bits(16)?;
-        let time_scale_lo = bs.read_bits(16)?;
-        let time_scale = (time_scale_hi << 16) | time_scale_lo;
+        let time_scale = bs.read_bits(32)?;
 
         if num_units_in_tick > 0 && time_scale > 0 {
             // H.264 timing: fps = time_scale / (2 * num_units_in_tick)
