@@ -53,6 +53,7 @@ pub struct ClientState {
     pub connected_since: Instant,
     pub bytes_sent: AtomicU64,
     pub remote_addr: String,
+    pub user_agent: String,
     pub transcoding: bool,
 }
 

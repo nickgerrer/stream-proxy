@@ -20,6 +20,9 @@ pub enum ProxyEvent {
         channel_id: String,
         client_id: String,
         remote_addr: String,
+        user_agent: String,
+        stream_id: u64,
+        account_id: u64,
         transcoding: bool,
         timestamp: String,
     },
@@ -411,6 +414,9 @@ mod tests {
             channel_id: "ch-1".to_string(),
             client_id: "client-abc".to_string(),
             remote_addr: "192.168.1.1:12345".to_string(),
+            user_agent: "VLC/3.0.20".to_string(),
+            stream_id: 42,
+            account_id: 5,
             transcoding: false,
             timestamp: "2026-03-13T00:00:00Z".to_string(),
         };
@@ -421,6 +427,9 @@ mod tests {
         assert_eq!(deser["type"], "connection_opened");
         assert_eq!(deser["channel_id"], "ch-1");
         assert_eq!(deser["client_id"], "client-abc");
+        assert_eq!(deser["user_agent"], "VLC/3.0.20");
+        assert_eq!(deser["stream_id"], 42);
+        assert_eq!(deser["account_id"], 5);
         assert_eq!(deser["transcoding"], false);
     }
 
@@ -484,6 +493,9 @@ mod tests {
                 channel_id: "ch".into(),
                 client_id: "c".into(),
                 remote_addr: "addr".into(),
+                user_agent: "test".into(),
+                stream_id: 1,
+                account_id: 1,
                 transcoding: true,
                 timestamp: "ts".into(),
             },
@@ -557,6 +569,9 @@ mod tests {
             channel_id: "overflow".into(),
             client_id: "c".into(),
             remote_addr: "addr".into(),
+            user_agent: "".into(),
+            stream_id: 0,
+            account_id: 0,
             transcoding: false,
             timestamp: "ts".into(),
         });
@@ -593,6 +608,9 @@ mod tests {
             channel_id: "ch-1".into(),
             client_id: "c".into(),
             remote_addr: "addr".into(),
+            user_agent: "".into(),
+            stream_id: 0,
+            account_id: 0,
             transcoding: false,
             timestamp: "ts".into(),
         });
@@ -738,6 +756,9 @@ mod tests {
             channel_id: "ch-1".into(),
             client_id: "c".into(),
             remote_addr: "addr".into(),
+            user_agent: "".into(),
+            stream_id: 0,
+            account_id: 0,
             transcoding: false,
             timestamp: "ts".into(),
         });

@@ -74,6 +74,7 @@ pub struct ClientInfo {
     pub connected_since: String,
     pub bytes_sent: u64,
     pub remote_addr: String,
+    pub user_agent: String,
     pub transcoding: bool,
 }
 

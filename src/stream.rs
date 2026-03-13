@@ -4,7 +4,7 @@ use crate::upstream;
 use axum::{
     body::Body,
     extract::{ConnectInfo, Path, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -333,8 +333,14 @@ pub async fn stream_channel(
     State(state): State<Arc<AppState>>,
     Path(channel_id): Path<String>,
     Query(params): Query<StreamParams>,
+    headers: HeaderMap,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     // Get or start the channel (with startup lock to prevent races)
     let active = if let Some(existing) = state.active_channels.get(&channel_id) {
         existing.value().clone()
@@ -386,6 +392,7 @@ pub async fn stream_channel(
             connected_since: Instant::now(),
             bytes_sent: AtomicU64::new(0),
             remote_addr: addr.to_string(),
+            user_agent: user_agent.clone(),
             transcoding: transcode,
         },
     );
@@ -408,6 +415,9 @@ pub async fn stream_channel(
             channel_id: channel_id.clone(),
             client_id: client_id.clone(),
             remote_addr: addr.to_string(),
+            user_agent: user_agent.clone(),
+            stream_id: active.stream_id,
+            account_id: active.account_id,
             transcoding: transcode,
             timestamp: events::now_rfc3339(),
         });
