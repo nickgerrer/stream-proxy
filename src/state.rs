@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::metrics::ChannelMetrics;
 use crate::models::*;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -69,6 +70,7 @@ pub struct ActiveChannel {
     pub sender: broadcast::Sender<bytes::Bytes>,
     pub clients: DashMap<String, ClientState>,
     pub stop_tx: tokio::sync::watch::Sender<bool>,
+    pub metrics: Arc<ChannelMetrics>,
 }
 
 /// Top-level application state shared across all handlers

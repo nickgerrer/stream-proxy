@@ -82,10 +82,12 @@ fn build_raw_response(
                             if let Some(client) = active.clients.get(&client_id) {
                                 client.bytes_sent.fetch_add(len, Ordering::Relaxed);
                             }
+                            active.metrics.record_data_sent();
                             yield Ok::<_, std::io::Error>(chunk);
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("Client {} lagged {} messages", client_id, n);
+                            active.metrics.record_client_lag(&client_id, n);
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::info!("Broadcast closed for client {}", client_id);
@@ -94,6 +96,7 @@ fn build_raw_response(
                     }
                 }
                 _ = keepalive_interval.tick() => {
+                    active.metrics.record_keepalive_sent();
                     yield Ok::<_, std::io::Error>(keepalive.clone());
                 }
             }
@@ -168,15 +171,18 @@ fn build_transcoded_response(
                                                             if let Some(client) = active.clients.get(&client_id) {
                                                                 client.bytes_sent.fetch_add(len, Ordering::Relaxed);
                                                             }
+                                                            active.metrics.record_data_sent();
                                                             yield Ok::<_, std::io::Error>(chunk);
                                                         }
                                                         Err(broadcast::error::RecvError::Lagged(n)) => {
                                                             tracing::warn!("Client {} lagged {} messages", client_id, n);
+                                                            active.metrics.record_client_lag(&client_id, n);
                                                         }
                                                         Err(broadcast::error::RecvError::Closed) => break,
                                                     }
                                                 }
                                                 _ = raw_keepalive_interval.tick() => {
+                                                    active.metrics.record_keepalive_sent();
                                                     yield Ok::<_, std::io::Error>(keepalive.clone());
                                                 }
                                             }
@@ -190,6 +196,7 @@ fn build_transcoded_response(
                                         if let Some(client) = active.clients.get(&client_id) {
                                             client.bytes_sent.fetch_add(len, Ordering::Relaxed);
                                         }
+                                        active.metrics.record_data_sent();
                                         yield Ok::<_, std::io::Error>(data);
                                     }
                                     Err(e) => {
@@ -202,6 +209,7 @@ fn build_transcoded_response(
                                 }
                             }
                             _ = keepalive_interval.tick() => {
+                                active.metrics.record_keepalive_sent();
                                 yield Ok::<_, std::io::Error>(keepalive.clone());
                             }
                         }
@@ -232,15 +240,18 @@ fn build_transcoded_response(
                                         if let Some(client) = active.clients.get(&client_id) {
                                             client.bytes_sent.fetch_add(len, Ordering::Relaxed);
                                         }
+                                        active.metrics.record_data_sent();
                                         yield Ok::<_, std::io::Error>(chunk);
                                     }
                                     Err(broadcast::error::RecvError::Lagged(n)) => {
                                         tracing::warn!("Client {} lagged {} messages", client_id, n);
+                                        active.metrics.record_client_lag(&client_id, n);
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }
                             }
                             _ = raw_keepalive_interval.tick() => {
+                                active.metrics.record_keepalive_sent();
                                 yield Ok::<_, std::io::Error>(keepalive.clone());
                             }
                         }
@@ -320,6 +331,10 @@ pub async fn stream_channel(
             transcoding: transcode,
         },
     );
+
+    // Register viewer for metrics tracking
+    let client_count = active.clients.len() as u32;
+    active.metrics.register_viewer(&addr.to_string(), client_count);
 
     tracing::info!(
         "Channel {}: client {} connected from {}{}",

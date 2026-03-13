@@ -1,5 +1,6 @@
 mod config;
 mod control;
+mod metrics;
 mod models;
 mod ssdp;
 mod state;

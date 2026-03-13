@@ -1,3 +1,4 @@
+use crate::metrics::ChannelMetrics;
 use crate::state::{ActiveChannel, AppState};
 use bytes::Bytes;
 use reqwest::Client;
@@ -23,6 +24,7 @@ pub fn start_channel(
 ) -> Arc<ActiveChannel> {
     let (tx, _) = broadcast::channel::<Bytes>(BROADCAST_CAPACITY);
     let (stop_tx, stop_rx) = watch::channel(false);
+    let metrics = Arc::new(ChannelMetrics::new());
 
     let active = Arc::new(ActiveChannel {
         stream_id,
@@ -33,6 +35,7 @@ pub fn start_channel(
         sender: tx.clone(),
         clients: dashmap::DashMap::new(),
         stop_tx,
+        metrics,
     });
 
     state.increment_connections(account_id);
@@ -102,6 +105,7 @@ async fn upstream_loop(
 
             if is_retryable && same_url_retries < state.config.max_same_url_retries {
                 same_url_retries += 1;
+                active.metrics.record_reconnect();
                 tracing::info!(
                     "Channel {}: transient error, retrying same URL ({}/{})",
                     channel_id,
@@ -135,6 +139,7 @@ async fn upstream_loop(
             if let Some((next_sid, next_aid, next_url)) =
                 state.select_next_stream(&channel_id, stream_id, account_id)
             {
+                active.metrics.record_reconnect();
                 tracing::info!(
                     "Channel {}: failing over to stream={}, account={}",
                     channel_id,
@@ -171,11 +176,19 @@ async fn fetch_upstream(
 ) -> Result<(), String> {
     use futures_util::StreamExt;
 
+    let connect_start = Instant::now();
+
     let response = client
         .get(url)
         .send()
         .await
         .map_err(|e| format!("connect error: {}", e))?;
+
+    let response_time_ms = connect_start.elapsed().as_millis() as u64;
+    active
+        .metrics
+        .upstream_response_time_ms
+        .store(response_time_ms, Ordering::Relaxed);
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
@@ -183,6 +196,7 @@ async fn fetch_upstream(
 
     let mut byte_stream = response.bytes_stream();
     let mut buffer = Vec::with_capacity(CHUNK_SIZE);
+    let mut first_byte_recorded = false;
 
     loop {
         tokio::select! {
@@ -192,6 +206,13 @@ async fn fetch_upstream(
             chunk = byte_stream.next() => {
                 match chunk {
                     Some(Ok(data)) => {
+                        // Record time to first byte
+                        if !first_byte_recorded {
+                            let ttfb_ms = connect_start.elapsed().as_millis() as u64;
+                            active.metrics.time_to_first_byte_ms.store(ttfb_ms, Ordering::Relaxed);
+                            first_byte_recorded = true;
+                        }
+
                         buffer.extend_from_slice(&data);
 
                         // Flush when buffer is large enough
@@ -199,6 +220,12 @@ async fn fetch_upstream(
                             let chunk = Bytes::copy_from_slice(&buffer[..CHUNK_SIZE]);
                             buffer.drain(..CHUNK_SIZE);
                             active.bytes_transferred.fetch_add(CHUNK_SIZE as u64, Ordering::Relaxed);
+
+                            // Process chunk through TS inspector (reads only, doesn't modify buffer)
+                            active.metrics.process_chunk(&chunk);
+
+                            // Sample bitrate
+                            active.metrics.record_bitrate_sample(CHUNK_SIZE);
 
                             // Send to all clients; if no receivers, that's fine
                             let _ = tx.send(chunk);
@@ -210,8 +237,14 @@ async fn fetch_upstream(
                     None => {
                         // Stream ended — flush remaining buffer
                         if !buffer.is_empty() {
+                            let len = buffer.len();
                             let chunk = Bytes::from(buffer);
-                            active.bytes_transferred.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                            active.bytes_transferred.fetch_add(len as u64, Ordering::Relaxed);
+
+                            // Process final chunk through inspector
+                            active.metrics.process_chunk(&chunk);
+                            active.metrics.record_bitrate_sample(len);
+
                             let _ = tx.send(chunk);
                         }
                         return Err("stream ended".to_string());
