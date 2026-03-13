@@ -44,12 +44,28 @@ struct ClientGuard {
 
 impl Drop for ClientGuard {
     fn drop(&mut self) {
+        let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
+
+        // Capture session duration from ClientState before removing from the map
+        let duration_secs = self
+            .active
+            .clients
+            .get(&self.client_id)
+            .map(|client| client.connected_since.elapsed().as_secs())
+            .unwrap_or(0);
+
+        // Record session completion into ChannelMetrics for the event system (Batch 4)
+        self.active
+            .metrics
+            .record_session_end(&self.client_id, bytes_sent, duration_secs);
+
         self.active.clients.remove(&self.client_id);
         tracing::info!(
-            "Channel {}: client {} disconnected (sent {} bytes)",
+            "Channel {}: client {} disconnected (sent {} bytes, duration {}s)",
             self.channel_id,
             self.client_id,
-            self.bytes_sent.load(Ordering::Relaxed)
+            bytes_sent,
+            duration_secs
         );
 
         // If last client, stop the channel immediately

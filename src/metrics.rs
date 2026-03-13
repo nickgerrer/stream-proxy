@@ -4,6 +4,15 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Record of a completed client session, stored for the event system (Batch 4).
+#[derive(Debug, Clone)]
+pub struct CompletedSession {
+    pub client_id: String,
+    pub bytes_sent: u64,
+    pub duration_secs: u64,
+    pub completed_at: Instant,
+}
+
 /// Duration of the bitrate sample window.
 const BITRATE_WINDOW_SECS: u64 = 120;
 
@@ -50,6 +59,9 @@ pub struct ChannelMetrics {
     pub peak_concurrent_viewers: AtomicU32,
     pub total_unique_viewers: AtomicU32,
     pub unique_viewer_ips: Mutex<HashSet<String>>,
+
+    // -- Completed session log --
+    pub completed_sessions: Mutex<Vec<CompletedSession>>,
 }
 
 impl ChannelMetrics {
@@ -75,6 +87,7 @@ impl ChannelMetrics {
             peak_concurrent_viewers: AtomicU32::new(0),
             total_unique_viewers: AtomicU32::new(0),
             unique_viewer_ips: Mutex::new(HashSet::new()),
+            completed_sessions: Mutex::new(Vec::new()),
         }
     }
 
@@ -226,6 +239,25 @@ impl ChannelMetrics {
         if ips.insert(remote_addr.to_string()) {
             self.total_unique_viewers.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Record a completed client session (called from ClientGuard::drop).
+    /// Stores session data for the event system (Batch 4) to include in ConnectionClosed events.
+    pub fn record_session_end(&self, client_id: &str, bytes_sent: u64, duration_secs: u64) {
+        let session = CompletedSession {
+            client_id: client_id.to_string(),
+            bytes_sent,
+            duration_secs,
+            completed_at: Instant::now(),
+        };
+        let mut sessions = self.completed_sessions.lock().unwrap();
+        sessions.push(session);
+    }
+
+    /// Drain all completed sessions (consuming them). Used by the event system to emit events.
+    pub fn drain_completed_sessions(&self) -> Vec<CompletedSession> {
+        let mut sessions = self.completed_sessions.lock().unwrap();
+        std::mem::take(&mut *sessions)
     }
 
     /// Record an upstream reconnect event.
@@ -760,5 +792,82 @@ mod tests {
         });
 
         assert!(!is_keyframe_start(&payload, &inspector));
+    }
+
+    // -----------------------------------------------------------------------
+    // Session recording tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn record_session_end_stores_session() {
+        let metrics = ChannelMetrics::new();
+
+        metrics.record_session_end("client-abc", 1_000_000, 120);
+
+        let sessions = metrics.completed_sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].client_id, "client-abc");
+        assert_eq!(sessions[0].bytes_sent, 1_000_000);
+        assert_eq!(sessions[0].duration_secs, 120);
+    }
+
+    #[test]
+    fn record_session_end_multiple_sessions() {
+        let metrics = ChannelMetrics::new();
+
+        metrics.record_session_end("client-1", 500, 10);
+        metrics.record_session_end("client-2", 2000, 60);
+        metrics.record_session_end("client-3", 0, 0);
+
+        let sessions = metrics.completed_sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[0].client_id, "client-1");
+        assert_eq!(sessions[1].client_id, "client-2");
+        assert_eq!(sessions[2].client_id, "client-3");
+    }
+
+    #[test]
+    fn drain_completed_sessions_empties_vec() {
+        let metrics = ChannelMetrics::new();
+
+        metrics.record_session_end("client-1", 100, 5);
+        metrics.record_session_end("client-2", 200, 10);
+
+        let drained = metrics.drain_completed_sessions();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].client_id, "client-1");
+        assert_eq!(drained[1].client_id, "client-2");
+
+        // Vec should now be empty
+        let after = metrics.drain_completed_sessions();
+        assert!(after.is_empty());
+    }
+
+    #[test]
+    fn record_session_end_concurrent() {
+        use std::sync::Arc;
+
+        let metrics = Arc::new(ChannelMetrics::new());
+        let mut handles = vec![];
+
+        for i in 0..10 {
+            let m = metrics.clone();
+            handles.push(thread::spawn(move || {
+                for j in 0..5 {
+                    m.record_session_end(
+                        &format!("client-{}-{}", i, j),
+                        1000 * (i as u64),
+                        j as u64,
+                    );
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let sessions = metrics.completed_sessions.lock().unwrap();
+        assert_eq!(sessions.len(), 50);
     }
 }
