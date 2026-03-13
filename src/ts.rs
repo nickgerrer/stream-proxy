@@ -726,6 +726,7 @@ pub struct AudioDetails {
     pub profile: u8,
     pub sample_rate: u32,
     pub channels: u8,
+    pub bitrate_kbps: Option<u32>,
 }
 
 /// Combined stream information detected from a transport stream.
@@ -1781,6 +1782,7 @@ impl StreamInfoDetector {
                         profile: info.profile,
                         sample_rate: info.sample_rate,
                         channels: info.channels,
+                        bitrate_kbps: None,
                     });
                     self.audio_detected = true;
                 }
@@ -1791,6 +1793,7 @@ impl StreamInfoDetector {
                         profile: 0,
                         sample_rate: info.sample_rate,
                         channels: info.channels,
+                        bitrate_kbps: None,
                     });
                     self.audio_detected = true;
                 }
@@ -1801,6 +1804,7 @@ impl StreamInfoDetector {
                         profile: 0,
                         sample_rate: info.sample_rate,
                         channels: info.channels,
+                        bitrate_kbps: None,
                     });
                     self.audio_detected = true;
                 }

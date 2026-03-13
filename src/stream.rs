@@ -296,6 +296,14 @@ fn build_transcoded_response(
                                     Err(broadcast::error::RecvError::Lagged(n)) => {
                                         tracing::warn!("Client {} lagged {} messages", client_id, n);
                                         active.metrics.record_client_lag(&client_id, n);
+                                        if let Some(collector) = &state.events {
+                                            collector.push(ProxyEvent::ClientLagged {
+                                                channel_id: channel_id.clone(),
+                                                client_id: client_id.clone(),
+                                                messages_skipped: n,
+                                                timestamp: events::now_rfc3339(),
+                                            });
+                                        }
                                     }
                                     Err(broadcast::error::RecvError::Closed) => break,
                                 }

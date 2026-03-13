@@ -138,6 +138,7 @@ pub struct StreamInfoStatus {
     pub audio_profile: Option<String>,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u8>,
+    pub audio_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

@@ -151,6 +151,7 @@ fn build_metrics_info(metrics: &crate::metrics::ChannelMetrics) -> ChannelMetric
             audio_profile: payload.audio_profile,
             audio_sample_rate: payload.audio_sample_rate,
             audio_channels: payload.audio_channels,
+            audio_bitrate_kbps: payload.audio_bitrate_kbps,
         }
     });
 

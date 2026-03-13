@@ -84,6 +84,7 @@ pub struct StreamInfoPayload {
     pub audio_profile: Option<String>,
     pub audio_sample_rate: Option<u32>,
     pub audio_channels: Option<u8>,
+    pub audio_bitrate_kbps: Option<u32>,
 }
 
 impl StreamInfoPayload {
@@ -123,7 +124,7 @@ impl StreamInfoPayload {
                 (None, None, None, None, None, None, None)
             };
 
-        let (audio_codec, audio_profile, audio_sample_rate, audio_channels) =
+        let (audio_codec, audio_profile, audio_sample_rate, audio_channels, audio_bitrate_kbps) =
             if let (Some(codec), Some(details)) = (&info.audio_codec, &info.audio_details) {
                 let codec_name = match codec {
                     AudioCodec::Aac => "aac",
@@ -137,9 +138,10 @@ impl StreamInfoPayload {
                     Some(profile),
                     Some(details.sample_rate),
                     Some(details.channels),
+                    details.bitrate_kbps,
                 )
             } else {
-                (None, None, None, None)
+                (None, None, None, None, None)
             };
 
         Self {
@@ -154,6 +156,7 @@ impl StreamInfoPayload {
             audio_profile,
             audio_sample_rate,
             audio_channels,
+            audio_bitrate_kbps,
         }
     }
 }
@@ -455,6 +458,7 @@ mod tests {
                 audio_profile: Some("LC".to_string()),
                 audio_sample_rate: Some(44100),
                 audio_channels: Some(2),
+                audio_bitrate_kbps: None,
             },
             timestamp: "2026-03-13T00:00:00Z".to_string(),
         };
@@ -668,6 +672,7 @@ mod tests {
                 profile: 2,
                 sample_rate: 44100,
                 channels: 2,
+                bitrate_kbps: None,
             }),
             subtitle_pids: vec![],
             total_pids: 3,
@@ -699,6 +704,7 @@ mod tests {
                 profile: 0,
                 sample_rate: 48000,
                 channels: 6,
+                bitrate_kbps: None,
             }),
             subtitle_pids: vec![],
             total_pids: 1,
