@@ -8,6 +8,10 @@ pub struct Config {
     pub max_failovers: u32,
     pub max_same_url_retries: u32,
     pub retry_delay: Duration,
+    /// URL of the Transmitarr Laravel app (for event push). `None` disables event push.
+    pub transmitarr_url: Option<String>,
+    /// How often (in seconds) to flush buffered events to Transmitarr.
+    pub metrics_flush_interval_secs: u64,
 }
 
 impl Config {
@@ -19,6 +23,8 @@ impl Config {
             max_failovers: env_or("MAX_FAILOVERS", 10),
             max_same_url_retries: env_or("MAX_SAME_URL_RETRIES", 3),
             retry_delay: Duration::from_secs(env_or("RETRY_DELAY_SECS", 3)),
+            transmitarr_url: std::env::var("TRANSMITARR_URL").ok().filter(|s| !s.is_empty()),
+            metrics_flush_interval_secs: env_or("METRICS_FLUSH_SECS", 2),
         }
     }
 }

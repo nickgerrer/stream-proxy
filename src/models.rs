@@ -103,6 +103,41 @@ pub struct ChannelDetailResponse {
     pub status: ChannelStatus,
     pub clients: Vec<ClientInfo>,
     pub cooldowns: Vec<CooldownInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ChannelMetricsInfo>,
+}
+
+/// Stream-level metrics exposed in the channel detail endpoint.
+#[derive(Debug, Serialize, Clone)]
+pub struct ChannelMetricsInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_info: Option<StreamInfoStatus>,
+    pub upstream_bitrate_kbps: u64,
+    pub continuity_errors: u64,
+    pub pts_discontinuities: u64,
+    pub pcr_jitter_us: u64,
+    pub keyframe_interval_ms: u64,
+    pub keepalive_ratio: f64,
+    pub peak_viewers: u32,
+    pub total_unique_viewers: u32,
+    pub upstream_reconnects: u32,
+    pub time_to_first_byte_ms: u64,
+}
+
+/// Detected stream info for the status API.
+#[derive(Debug, Serialize, Clone)]
+pub struct StreamInfoStatus {
+    pub video_codec: Option<String>,
+    pub video_profile: Option<String>,
+    pub video_level: Option<String>,
+    pub resolution: Option<String>,
+    pub fps: Option<f64>,
+    pub chroma: Option<String>,
+    pub bit_depth: Option<u8>,
+    pub audio_codec: Option<String>,
+    pub audio_profile: Option<String>,
+    pub audio_sample_rate: Option<u32>,
+    pub audio_channels: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]

@@ -1,3 +1,4 @@
+use crate::events::StreamInfoPayload;
 use crate::models::*;
 use crate::state::AppState;
 use axum::{
@@ -101,6 +102,8 @@ pub async fn channel_detail(
             })
             .collect();
 
+        let metrics = build_metrics_info(&active.metrics);
+
         Ok(Json(ChannelDetailResponse {
             status: ChannelStatus {
                 state: "active".to_string(),
@@ -115,6 +118,7 @@ pub async fn channel_detail(
             },
             clients,
             cooldowns,
+            metrics: Some(metrics),
         }))
     } else if state.channel_routes.contains_key(&channel_id) {
         Ok(Json(ChannelDetailResponse {
@@ -125,9 +129,45 @@ pub async fn channel_detail(
             },
             clients: vec![],
             cooldowns,
+            metrics: None,
         }))
     } else {
         Err(StatusCode::NOT_FOUND)
+    }
+}
+
+fn build_metrics_info(metrics: &crate::metrics::ChannelMetrics) -> ChannelMetricsInfo {
+    let stream_info_status = metrics.stream_info.lock().unwrap().as_ref().map(|info| {
+        let payload = StreamInfoPayload::from_stream_info(info);
+        StreamInfoStatus {
+            video_codec: payload.video_codec,
+            video_profile: payload.video_profile,
+            video_level: payload.video_level,
+            resolution: payload.resolution,
+            fps: payload.fps,
+            chroma: payload.chroma,
+            bit_depth: payload.bit_depth,
+            audio_codec: payload.audio_codec,
+            audio_profile: payload.audio_profile,
+            audio_sample_rate: payload.audio_sample_rate,
+            audio_channels: payload.audio_channels,
+        }
+    });
+
+    let bitrate_bps = metrics.current_bitrate_bps(10);
+
+    ChannelMetricsInfo {
+        stream_info: stream_info_status,
+        upstream_bitrate_kbps: bitrate_bps / 1000,
+        continuity_errors: metrics.continuity_errors.load(Ordering::Relaxed),
+        pts_discontinuities: metrics.pts_discontinuities.load(Ordering::Relaxed),
+        pcr_jitter_us: metrics.pcr_jitter_us.load(Ordering::Relaxed),
+        keyframe_interval_ms: metrics.keyframe_interval_ms.load(Ordering::Relaxed),
+        keepalive_ratio: metrics.keepalive_ratio(),
+        peak_viewers: metrics.peak_concurrent_viewers.load(Ordering::Relaxed),
+        total_unique_viewers: metrics.total_unique_viewers.load(Ordering::Relaxed),
+        upstream_reconnects: metrics.upstream_reconnects.load(Ordering::Relaxed),
+        time_to_first_byte_ms: metrics.time_to_first_byte_ms.load(Ordering::Relaxed),
     }
 }
 

@@ -1,3 +1,4 @@
+use crate::events::{self, ProxyEvent};
 use crate::state::{AppState, ClientState};
 use crate::upstream;
 use axum::{
@@ -54,10 +55,21 @@ impl Drop for ClientGuard {
             .map(|client| client.connected_since.elapsed().as_secs())
             .unwrap_or(0);
 
-        // Record session completion into ChannelMetrics for the event system (Batch 4)
+        // Record session completion into ChannelMetrics
         self.active
             .metrics
             .record_session_end(&self.client_id, bytes_sent, duration_secs);
+
+        // Fire ConnectionClosed event
+        if let Some(collector) = &self.state.events {
+            collector.push(ProxyEvent::ConnectionClosed {
+                channel_id: self.channel_id.clone(),
+                client_id: self.client_id.clone(),
+                duration_secs,
+                bytes_sent,
+                timestamp: events::now_rfc3339(),
+            });
+        }
 
         self.active.clients.remove(&self.client_id);
         tracing::info!(
@@ -82,6 +94,8 @@ fn build_raw_response(
     client_id: String,
     client_bytes: Arc<AtomicU64>,
     guard: ClientGuard,
+    state: Arc<AppState>,
+    channel_id: String,
 ) -> Response {
     let body_stream = async_stream::stream! {
         let _guard = guard;
@@ -104,6 +118,16 @@ fn build_raw_response(
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("Client {} lagged {} messages", client_id, n);
                             active.metrics.record_client_lag(&client_id, n);
+
+                            // Fire ClientLagged event
+                            if let Some(collector) = &state.events {
+                                collector.push(ProxyEvent::ClientLagged {
+                                    channel_id: channel_id.clone(),
+                                    client_id: client_id.clone(),
+                                    messages_skipped: n,
+                                    timestamp: events::now_rfc3339(),
+                                });
+                            }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::info!("Broadcast closed for client {}", client_id);
@@ -133,6 +157,8 @@ fn build_transcoded_response(
     client_id: String,
     client_bytes: Arc<AtomicU64>,
     guard: ClientGuard,
+    state: Arc<AppState>,
+    channel_id: String,
 ) -> Response {
     let body_stream = async_stream::stream! {
         let _guard = guard;
@@ -193,6 +219,14 @@ fn build_transcoded_response(
                                                         Err(broadcast::error::RecvError::Lagged(n)) => {
                                                             tracing::warn!("Client {} lagged {} messages", client_id, n);
                                                             active.metrics.record_client_lag(&client_id, n);
+                                                            if let Some(collector) = &state.events {
+                                                                collector.push(ProxyEvent::ClientLagged {
+                                                                    channel_id: channel_id.clone(),
+                                                                    client_id: client_id.clone(),
+                                                                    messages_skipped: n,
+                                                                    timestamp: events::now_rfc3339(),
+                                                                });
+                                                            }
                                                         }
                                                         Err(broadcast::error::RecvError::Closed) => break,
                                                     }
@@ -360,6 +394,17 @@ pub async fn stream_channel(
         if transcode { " (transcoding)" } else { "" }
     );
 
+    // Fire ConnectionOpened event
+    if let Some(collector) = &state.events {
+        collector.push(ProxyEvent::ConnectionOpened {
+            channel_id: channel_id.clone(),
+            client_id: client_id.clone(),
+            remote_addr: addr.to_string(),
+            transcoding: transcode,
+            timestamp: events::now_rfc3339(),
+        });
+    }
+
     // Create drop guard for cleanup on client disconnect
     let guard = ClientGuard {
         channel_id: channel_id.clone(),
@@ -370,9 +415,9 @@ pub async fn stream_channel(
     };
 
     if transcode {
-        build_transcoded_response(active, client_id, client_bytes, guard)
+        build_transcoded_response(active, client_id, client_bytes, guard, state, channel_id)
     } else {
         let rx = active.sender.subscribe();
-        build_raw_response(rx, active, client_id, client_bytes, guard)
+        build_raw_response(rx, active, client_id, client_bytes, guard, state, channel_id)
     }
 }

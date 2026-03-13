@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::events::EventCollector;
 use crate::metrics::ChannelMetrics;
 use crate::models::*;
 use dashmap::DashMap;
@@ -85,11 +86,17 @@ pub struct AppState {
     pub starting_channels: DashMap<String, Arc<Mutex<()>>>,
     pub hdhr_tx: watch::Sender<Option<HdhrConfig>>,
     pub hdhr_rx: watch::Receiver<Option<HdhrConfig>>,
+    /// Event collector for pushing events to Transmitarr. `None` if event push is disabled.
+    pub events: Option<Arc<EventCollector>>,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Self {
         let (hdhr_tx, hdhr_rx) = watch::channel(None);
+        let events = config
+            .transmitarr_url
+            .as_ref()
+            .map(|url| Arc::new(EventCollector::new(url.clone())));
         Self {
             start_time: Instant::now(),
             config,
@@ -100,6 +107,7 @@ impl AppState {
             starting_channels: DashMap::new(),
             hdhr_tx,
             hdhr_rx,
+            events,
         }
     }
 

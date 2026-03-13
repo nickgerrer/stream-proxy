@@ -1,3 +1,4 @@
+use crate::events::{self, ProxyEvent, StreamInfoPayload};
 use crate::metrics::ChannelMetrics;
 use crate::state::{ActiveChannel, AppState};
 use bytes::Bytes;
@@ -86,7 +87,17 @@ async fn upstream_loop(
             account_id
         );
 
-        let result = fetch_upstream(&client, &url, &tx, &mut stop_rx, &active).await;
+        let result = fetch_upstream(
+            &client,
+            &url,
+            &tx,
+            &mut stop_rx,
+            &active,
+            &state,
+            &channel_id,
+            stream_id,
+        )
+        .await;
 
         // Check if we were told to stop
         if *stop_rx.borrow() {
@@ -146,6 +157,20 @@ async fn upstream_loop(
                     next_sid,
                     next_aid
                 );
+
+                // Fire StreamFailover event
+                if let Some(collector) = &state.events {
+                    collector.push(ProxyEvent::StreamFailover {
+                        channel_id: channel_id.clone(),
+                        from_stream_id: stream_id,
+                        from_account_id: account_id,
+                        to_stream_id: next_sid,
+                        to_account_id: next_aid,
+                        reason: e.clone(),
+                        timestamp: events::now_rfc3339(),
+                    });
+                }
+
                 if next_aid != account_id {
                     // Cross-account failover: release old slot, acquire new one
                     state.decrement_connections(account_id);
@@ -173,6 +198,9 @@ async fn fetch_upstream(
     tx: &broadcast::Sender<Bytes>,
     stop_rx: &mut watch::Receiver<bool>,
     active: &ActiveChannel,
+    state: &AppState,
+    channel_id: &str,
+    stream_id: u64,
 ) -> Result<(), String> {
     use futures_util::StreamExt;
 
@@ -197,6 +225,7 @@ async fn fetch_upstream(
     let mut byte_stream = response.bytes_stream();
     let mut buffer = Vec::with_capacity(CHUNK_SIZE);
     let mut first_byte_recorded = false;
+    let mut stream_info_emitted = false;
 
     loop {
         tokio::select! {
@@ -223,6 +252,21 @@ async fn fetch_upstream(
 
                             // Process chunk through TS inspector (reads only, doesn't modify buffer)
                             active.metrics.process_chunk(&chunk);
+
+                            // Fire StreamInfo event once when stream info is first detected
+                            if !stream_info_emitted {
+                                if let Some(info) = active.metrics.stream_info.lock().unwrap().as_ref() {
+                                    if let Some(collector) = &state.events {
+                                        collector.push(ProxyEvent::StreamInfo {
+                                            channel_id: channel_id.to_string(),
+                                            stream_id,
+                                            info: StreamInfoPayload::from_stream_info(info),
+                                            timestamp: events::now_rfc3339(),
+                                        });
+                                    }
+                                    stream_info_emitted = true;
+                                }
+                            }
 
                             // Sample bitrate
                             active.metrics.record_bitrate_sample(CHUNK_SIZE);

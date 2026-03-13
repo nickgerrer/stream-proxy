@@ -1,5 +1,6 @@
 mod config;
 mod control;
+mod events;
 mod metrics;
 mod models;
 mod ssdp;
@@ -23,7 +24,14 @@ async fn main() {
 
     let config = config::Config::from_env();
     let port = config.port;
+    let flush_interval = config.metrics_flush_interval_secs;
     let state = Arc::new(state::AppState::new(config));
+
+    // Spawn event flush task if Transmitarr URL is configured
+    if let Some(collector) = &state.events {
+        events::spawn_flush_task(state.clone(), collector.clone(), flush_interval);
+        tracing::info!("Event push enabled (flush every {}s)", flush_interval);
+    }
 
     // Spawn periodic cooldown cleanup (every 5 minutes)
     {
