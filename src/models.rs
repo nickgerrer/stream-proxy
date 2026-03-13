@@ -1,3 +1,4 @@
+use crate::events::StreamInfoPayload;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -111,7 +112,7 @@ pub struct ChannelDetailResponse {
 #[derive(Debug, Serialize, Clone)]
 pub struct ChannelMetricsInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream_info: Option<StreamInfoStatus>,
+    pub stream_info: Option<StreamInfoPayload>,
     pub upstream_bitrate_kbps: u64,
     pub continuity_errors: u64,
     pub pts_discontinuities: u64,
@@ -122,23 +123,6 @@ pub struct ChannelMetricsInfo {
     pub total_unique_viewers: u32,
     pub upstream_reconnects: u32,
     pub time_to_first_byte_ms: u64,
-}
-
-/// Detected stream info for the status API.
-#[derive(Debug, Serialize, Clone)]
-pub struct StreamInfoStatus {
-    pub video_codec: Option<String>,
-    pub video_profile: Option<String>,
-    pub video_level: Option<String>,
-    pub resolution: Option<String>,
-    pub fps: Option<f64>,
-    pub chroma: Option<String>,
-    pub bit_depth: Option<u8>,
-    pub audio_codec: Option<String>,
-    pub audio_profile: Option<String>,
-    pub audio_sample_rate: Option<u32>,
-    pub audio_channels: Option<u8>,
-    pub audio_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

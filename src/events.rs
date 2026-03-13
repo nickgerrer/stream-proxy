@@ -232,10 +232,15 @@ pub struct EventCollector {
 
 impl EventCollector {
     pub fn new(transmitarr_url: String) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("failed to build HTTP client");
+
         Self {
             buffer: Mutex::new(Vec::new()),
             transmitarr_url,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 

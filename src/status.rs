@@ -137,28 +137,17 @@ pub async fn channel_detail(
 }
 
 fn build_metrics_info(metrics: &crate::metrics::ChannelMetrics) -> ChannelMetricsInfo {
-    let stream_info_status = metrics.stream_info.lock().unwrap().as_ref().map(|info| {
-        let payload = StreamInfoPayload::from_stream_info(info);
-        StreamInfoStatus {
-            video_codec: payload.video_codec,
-            video_profile: payload.video_profile,
-            video_level: payload.video_level,
-            resolution: payload.resolution,
-            fps: payload.fps,
-            chroma: payload.chroma,
-            bit_depth: payload.bit_depth,
-            audio_codec: payload.audio_codec,
-            audio_profile: payload.audio_profile,
-            audio_sample_rate: payload.audio_sample_rate,
-            audio_channels: payload.audio_channels,
-            audio_bitrate_kbps: payload.audio_bitrate_kbps,
-        }
-    });
+    let stream_info = metrics
+        .stream_info
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|info| StreamInfoPayload::from_stream_info(info));
 
     let bitrate_bps = metrics.current_bitrate_bps(10);
 
     ChannelMetricsInfo {
-        stream_info: stream_info_status,
+        stream_info,
         upstream_bitrate_kbps: bitrate_bps / 1000,
         continuity_errors: metrics.continuity_errors.load(Ordering::Relaxed),
         pts_discontinuities: metrics.pts_discontinuities.load(Ordering::Relaxed),
