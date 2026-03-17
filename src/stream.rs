@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::time::Instant;
 
 const MAX_FFMPEG_RESTARTS: u32 = 3;
@@ -97,7 +97,9 @@ fn build_raw_response(
     state: Arc<AppState>,
     channel_id: String,
 ) -> Response {
-    let body_stream = async_stream::stream! {
+    let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+
+    tokio::spawn(async move {
         let _guard = guard;
         let keepalive = ts_null_packet();
         let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -113,13 +115,14 @@ fn build_raw_response(
                                 client.bytes_sent.fetch_add(len, Ordering::Relaxed);
                             }
                             active.metrics.record_data_sent();
-                            yield Ok::<_, std::io::Error>(chunk);
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                break;
+                            }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!("Client {} lagged {} messages", client_id, n);
                             active.metrics.record_client_lag(&client_id, n);
 
-                            // Fire ClientLagged event
                             if let Some(collector) = &state.events {
                                 collector.push(ProxyEvent::ClientLagged {
                                     channel_id: channel_id.clone(),
@@ -137,11 +140,21 @@ fn build_raw_response(
                 }
                 _ = keepalive_interval.tick() => {
                     active.metrics.record_keepalive_sent();
-                    yield Ok::<_, std::io::Error>(keepalive.clone());
+                    if tx.send(Ok(keepalive.clone())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = tx.closed() => {
+                    tracing::info!("Client {} disconnected (body dropped)", client_id);
+                    break;
                 }
             }
         }
-    };
+    });
+
+    let body_stream = futures_util::stream::unfold(body_rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    });
 
     Response::builder()
         .status(StatusCode::OK)
@@ -152,6 +165,61 @@ fn build_raw_response(
         .unwrap()
 }
 
+/// Raw passthrough loop shared by transcoded response fallback paths.
+async fn raw_passthrough(
+    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+    active: &Arc<crate::state::ActiveChannel>,
+    client_id: &str,
+    client_bytes: &Arc<AtomicU64>,
+    state: &Arc<AppState>,
+    channel_id: &str,
+    keepalive: &Bytes,
+) {
+    let mut raw_rx = active.sender.subscribe();
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            result = raw_rx.recv() => {
+                match result {
+                    Ok(chunk) => {
+                        let len = chunk.len() as u64;
+                        client_bytes.fetch_add(len, Ordering::Relaxed);
+                        if let Some(client) = active.clients.get(client_id) {
+                            client.bytes_sent.fetch_add(len, Ordering::Relaxed);
+                        }
+                        active.metrics.record_data_sent();
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Client {} lagged {} messages", client_id, n);
+                        active.metrics.record_client_lag(client_id, n);
+                        if let Some(collector) = &state.events {
+                            collector.push(ProxyEvent::ClientLagged {
+                                channel_id: channel_id.to_string(),
+                                client_id: client_id.to_string(),
+                                messages_skipped: n,
+                                timestamp: events::now_rfc3339(),
+                            });
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            _ = interval.tick() => {
+                active.metrics.record_keepalive_sent();
+                if tx.send(Ok(keepalive.clone())).await.is_err() {
+                    return;
+                }
+            }
+            _ = tx.closed() => {
+                return;
+            }
+        }
+    }
+}
+
 fn build_transcoded_response(
     active: Arc<crate::state::ActiveChannel>,
     client_id: String,
@@ -160,12 +228,14 @@ fn build_transcoded_response(
     state: Arc<AppState>,
     channel_id: String,
 ) -> Response {
-    let body_stream = async_stream::stream! {
+    let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
+
+    tokio::spawn(async move {
         let _guard = guard;
         let mut restarts = 0u32;
         let keepalive = ts_null_packet();
 
-        loop {
+        'outer: loop {
             let new_rx = active.sender.subscribe();
             match crate::transcode::spawn_ffmpeg(new_rx, &client_id) {
                 Ok((mut child, writer)) => {
@@ -199,45 +269,8 @@ fn build_transcoded_response(
                                             "Client {}: FFmpeg restart limit reached, falling back to raw",
                                             client_id
                                         );
-                                        // Fall back to raw passthrough (inlined)
-                                        let mut raw_rx = active.sender.subscribe();
-                                        let mut raw_keepalive_interval =
-                                            tokio::time::interval(std::time::Duration::from_millis(500));
-                                        loop {
-                                            tokio::select! {
-                                                result = raw_rx.recv() => {
-                                                    match result {
-                                                        Ok(chunk) => {
-                                                            let len = chunk.len() as u64;
-                                                            client_bytes.fetch_add(len, Ordering::Relaxed);
-                                                            if let Some(client) = active.clients.get(&client_id) {
-                                                                client.bytes_sent.fetch_add(len, Ordering::Relaxed);
-                                                            }
-                                                            active.metrics.record_data_sent();
-                                                            yield Ok::<_, std::io::Error>(chunk);
-                                                        }
-                                                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                                                            tracing::warn!("Client {} lagged {} messages", client_id, n);
-                                                            active.metrics.record_client_lag(&client_id, n);
-                                                            if let Some(collector) = &state.events {
-                                                                collector.push(ProxyEvent::ClientLagged {
-                                                                    channel_id: channel_id.clone(),
-                                                                    client_id: client_id.clone(),
-                                                                    messages_skipped: n,
-                                                                    timestamp: events::now_rfc3339(),
-                                                                });
-                                                            }
-                                                        }
-                                                        Err(broadcast::error::RecvError::Closed) => break,
-                                                    }
-                                                }
-                                                _ = raw_keepalive_interval.tick() => {
-                                                    active.metrics.record_keepalive_sent();
-                                                    yield Ok::<_, std::io::Error>(keepalive.clone());
-                                                }
-                                            }
-                                        }
-                                        break; // break inner loop (outer will also exit)
+                                        raw_passthrough(&tx, &active, &client_id, &client_bytes, &state, &channel_id, &keepalive).await;
+                                        break 'outer;
                                     }
                                     Ok(n) => {
                                         let data = Bytes::copy_from_slice(&buf[..n]);
@@ -247,7 +280,9 @@ fn build_transcoded_response(
                                             client.bytes_sent.fetch_add(len, Ordering::Relaxed);
                                         }
                                         active.metrics.record_data_sent();
-                                        yield Ok::<_, std::io::Error>(data);
+                                        if tx.send(Ok(data)).await.is_err() {
+                                            break 'outer;
+                                        }
                                     }
                                     Err(e) => {
                                         tracing::error!(
@@ -260,7 +295,13 @@ fn build_transcoded_response(
                             }
                             _ = keepalive_interval.tick() => {
                                 active.metrics.record_keepalive_sent();
-                                yield Ok::<_, std::io::Error>(keepalive.clone());
+                                if tx.send(Ok(keepalive.clone())).await.is_err() {
+                                    break 'outer;
+                                }
+                            }
+                            _ = tx.closed() => {
+                                tracing::info!("Client {} disconnected (body dropped)", client_id);
+                                break 'outer;
                             }
                         }
                     }
@@ -276,49 +317,16 @@ fn build_transcoded_response(
                         "Client {}: FFmpeg spawn failed: {}, falling back to raw",
                         client_id, e
                     );
-                    // Fall back to raw passthrough (inlined)
-                    let mut raw_rx = active.sender.subscribe();
-                    let mut raw_keepalive_interval =
-                        tokio::time::interval(std::time::Duration::from_millis(500));
-                    loop {
-                        tokio::select! {
-                            result = raw_rx.recv() => {
-                                match result {
-                                    Ok(chunk) => {
-                                        let len = chunk.len() as u64;
-                                        client_bytes.fetch_add(len, Ordering::Relaxed);
-                                        if let Some(client) = active.clients.get(&client_id) {
-                                            client.bytes_sent.fetch_add(len, Ordering::Relaxed);
-                                        }
-                                        active.metrics.record_data_sent();
-                                        yield Ok::<_, std::io::Error>(chunk);
-                                    }
-                                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                                        tracing::warn!("Client {} lagged {} messages", client_id, n);
-                                        active.metrics.record_client_lag(&client_id, n);
-                                        if let Some(collector) = &state.events {
-                                            collector.push(ProxyEvent::ClientLagged {
-                                                channel_id: channel_id.clone(),
-                                                client_id: client_id.clone(),
-                                                messages_skipped: n,
-                                                timestamp: events::now_rfc3339(),
-                                            });
-                                        }
-                                    }
-                                    Err(broadcast::error::RecvError::Closed) => break,
-                                }
-                            }
-                            _ = raw_keepalive_interval.tick() => {
-                                active.metrics.record_keepalive_sent();
-                                yield Ok::<_, std::io::Error>(keepalive.clone());
-                            }
-                        }
-                    }
+                    raw_passthrough(&tx, &active, &client_id, &client_bytes, &state, &channel_id, &keepalive).await;
                     break; // exit outer loop
                 }
             }
         }
-    };
+    });
+
+    let body_stream = futures_util::stream::unfold(body_rx, |mut rx| async {
+        rx.recv().await.map(|item| (item, rx))
+    });
 
     Response::builder()
         .status(StatusCode::OK)
