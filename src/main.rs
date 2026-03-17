@@ -77,6 +77,10 @@ async fn main() {
             axum::routing::delete(control::clear_all_cooldowns),
         )
         .route(
+            "/control/v1/clients/{client_id}",
+            axum::routing::delete(control::stop_client),
+        )
+        .route(
             "/control/v1/hdhr",
             axum::routing::post(control::post_hdhr),
         )

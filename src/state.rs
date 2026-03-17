@@ -55,6 +55,7 @@ pub struct ClientState {
     pub remote_addr: String,
     pub user_agent: String,
     pub transcoding: bool,
+    pub cancel: Arc<tokio::sync::Notify>,
 }
 
 /// Routing config for a channel (from Django push)

@@ -96,6 +96,7 @@ fn build_raw_response(
     guard: ClientGuard,
     state: Arc<AppState>,
     channel_id: String,
+    cancel: Arc<tokio::sync::Notify>,
 ) -> Response {
     let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
@@ -148,6 +149,10 @@ fn build_raw_response(
                     tracing::info!("Client {} disconnected (body dropped)", client_id);
                     break;
                 }
+                _ = cancel.notified() => {
+                    tracing::info!("Client {} stopped via control API", client_id);
+                    break;
+                }
             }
         }
     });
@@ -174,6 +179,7 @@ async fn raw_passthrough(
     state: &Arc<AppState>,
     channel_id: &str,
     keepalive: &Bytes,
+    cancel: &Arc<tokio::sync::Notify>,
 ) {
     let mut raw_rx = active.sender.subscribe();
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -216,6 +222,10 @@ async fn raw_passthrough(
             _ = tx.closed() => {
                 return;
             }
+            _ = cancel.notified() => {
+                tracing::info!("Client {} stopped via control API (raw passthrough)", client_id);
+                return;
+            }
         }
     }
 }
@@ -227,6 +237,7 @@ fn build_transcoded_response(
     guard: ClientGuard,
     state: Arc<AppState>,
     channel_id: String,
+    cancel: Arc<tokio::sync::Notify>,
 ) -> Response {
     let (tx, body_rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(32);
 
@@ -269,7 +280,7 @@ fn build_transcoded_response(
                                             "Client {}: FFmpeg restart limit reached, falling back to raw",
                                             client_id
                                         );
-                                        raw_passthrough(&tx, &active, &client_id, &client_bytes, &state, &channel_id, &keepalive).await;
+                                        raw_passthrough(&tx, &active, &client_id, &client_bytes, &state, &channel_id, &keepalive, &cancel).await;
                                         break 'outer;
                                     }
                                     Ok(n) => {
@@ -303,6 +314,11 @@ fn build_transcoded_response(
                                 tracing::info!("Client {} disconnected (body dropped)", client_id);
                                 break 'outer;
                             }
+                            _ = cancel.notified() => {
+                                tracing::info!("Client {} stopped via control API (transcoding)", client_id);
+                                writer.abort();
+                                break 'outer;
+                            }
                         }
                     }
 
@@ -317,7 +333,7 @@ fn build_transcoded_response(
                         "Client {}: FFmpeg spawn failed: {}, falling back to raw",
                         client_id, e
                     );
-                    raw_passthrough(&tx, &active, &client_id, &client_bytes, &state, &channel_id, &keepalive).await;
+                    raw_passthrough(&tx, &active, &client_id, &client_bytes, &state, &channel_id, &keepalive, &cancel).await;
                     break; // exit outer loop
                 }
             }
@@ -393,6 +409,7 @@ pub async fn stream_channel(
     let client_id = uuid::Uuid::new_v4().to_string();
     let client_bytes = Arc::new(AtomicU64::new(0));
     let transcode = params.transcode.unwrap_or(false);
+    let cancel = Arc::new(tokio::sync::Notify::new());
     active.clients.insert(
         client_id.clone(),
         ClientState {
@@ -402,6 +419,7 @@ pub async fn stream_channel(
             remote_addr: addr.to_string(),
             user_agent: user_agent.clone(),
             transcoding: transcode,
+            cancel: cancel.clone(),
         },
     );
 
@@ -441,9 +459,9 @@ pub async fn stream_channel(
     };
 
     if transcode {
-        build_transcoded_response(active, client_id, client_bytes, guard, state, channel_id)
+        build_transcoded_response(active, client_id, client_bytes, guard, state, channel_id, cancel)
     } else {
         let rx = active.sender.subscribe();
-        build_raw_response(rx, active, client_id, client_bytes, guard, state, channel_id)
+        build_raw_response(rx, active, client_id, client_bytes, guard, state, channel_id, cancel)
     }
 }

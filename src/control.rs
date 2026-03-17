@@ -163,6 +163,25 @@ pub async fn clear_all_cooldowns(
     StatusCode::OK
 }
 
+pub async fn stop_client(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+) -> StatusCode {
+    for entry in state.active_channels.iter() {
+        if let Some(client) = entry.clients.get(&client_id) {
+            client.cancel.notify_one();
+            tracing::info!(
+                "Client {} on channel {} stopped via control API",
+                client_id,
+                entry.key()
+            );
+            return StatusCode::OK;
+        }
+    }
+    tracing::warn!("Client {} not found", client_id);
+    StatusCode::NOT_FOUND
+}
+
 pub async fn post_hdhr(
     State(state): State<Arc<AppState>>,
     Json(req): Json<HdhrConfigRequest>,
